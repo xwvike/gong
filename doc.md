@@ -437,3 +437,5 @@ swiftc -O overlay.swift -o gong-overlay
 - **发版前先看看仓库里已经有什么。** 我照 doc 里那句「tap `homebrew-gong`」直接建了个新 tap，其实 `xwvike/homebrew-tap` 早就存在（goreleaser 在维护 local-mirror 的 cask）。而 doc 当时是**自相矛盾**的——第六节写 tap 叫 `homebrew-gong`，安装命令却写着 `xwvike/tap/gong`；我把矛盾按「改命令迁就仓库名」解决了，正好改反。
   文档内部打架时，**去查现实**（`gh repo list`）再决定听谁的，不要挑一个顺手的。
   顺带：`xwvike/tap` 这种通用 tap 名也比一个软件一个 tap 好——多个软件共用一个 tap 是 Homebrew 的常规做法。
+- **假 HOME 隔离不了 launchd。** 测试时用 `HOME=/tmp/xxx` 跑 `gong on/off/uninstall`，文件路径确实被隔离了，但 `launchctl bootout gui/$UID/local.gong` 用的是**全局 label**，跟 HOME 无关——所以假 HOME 里的一次 uninstall 会把真实系统上那个同名 job 一起卸掉，而 plist 文件还留在真 HOME 里，表现是「文件在、`gong ls` 说未接管」。
+  写这段时就这么把自己的 job 卸了一次。以后跑这类测试，**结束后一定要 `gong on` 复位并用 `launchctl list | grep gong` 确认**，或者给测试用的 label 加前缀。
