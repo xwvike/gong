@@ -1,8 +1,14 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/xwvike/gong/internal/config"
 )
 
 func TestComputeTrigger(t *testing.T) {
@@ -36,5 +42,151 @@ func TestComputeTrigger(t *testing.T) {
 				t.Errorf("星期 = %v，想要 %v", got.Weekdays, c.wantDays)
 			}
 		})
+	}
+}
+
+func sched(name, at string, days []int) config.Schedule {
+	return config.Schedule{Name: name, At: at, Weekdays: days,
+		Theme: "default", Enabled: true, Grace: config.DefaultGrace}
+}
+
+// 2026-07-27 是周一
+func mon(h, m, s int) time.Time {
+	return time.Date(2026, 7, 27, h, m, s, 0, time.Local)
+}
+
+func TestMatch(t *testing.T) {
+	workdays := []int{1, 2, 3, 4, 5}
+	c := &config.Config{Schedules: []config.Schedule{
+		sched("noon", "12:00:00", workdays),
+		sched("evening", "18:00:00", workdays),
+	}}
+
+	cases := []struct {
+		name string
+		now  time.Time
+		want string
+	}{
+		{"正点在中午", mon(12, 0, 0), "noon"},
+		{"中午晚了两秒", mon(12, 0, 2), "noon"},
+		{"正点在傍晚", mon(18, 0, 0), "evening"},
+		{"下午两点更靠近中午", mon(14, 0, 0), "noon"},      // 距 12:00 两小时，距 18:00 四小时
+		{"下午四点半更靠近傍晚", mon(16, 30, 0), "evening"}, // 距 18:00 一个半小时
+		// 睡醒后 launchd 补跑：这里猜谁都行，壳的时间窗会挡掉，不能 panic
+		{"深夜补跑仍能给出一条", mon(23, 50, 0), "evening"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Match(c, tc.now)
+			if got == nil {
+				t.Fatal("没匹配到任何定时")
+			}
+			if got.Name != tc.want {
+				t.Errorf("匹配到 %s，想要 %s", got.Name, tc.want)
+			}
+		})
+	}
+}
+
+func TestMatchSkipsDisabled(t *testing.T) {
+	c := &config.Config{Schedules: []config.Schedule{
+		sched("noon", "12:00:00", []int{1}),
+		sched("evening", "18:00:00", []int{1}),
+	}}
+	c.Schedules[0].Enabled = false
+	got := Match(c, mon(12, 0, 0))
+	if got == nil || got.Name != "evening" {
+		t.Fatalf("停用的定时不该被匹配到，拿到 %v", got)
+	}
+}
+
+func TestMatchNoneEnabled(t *testing.T) {
+	c := &config.Config{Schedules: []config.Schedule{sched("noon", "12:00:00", []int{1})}}
+	c.Schedules[0].Enabled = false
+	if got := Match(c, mon(12, 0, 0)); got != nil {
+		t.Fatalf("一条启用的都没有时应该返回 nil，拿到 %v", got)
+	}
+}
+
+// 周日午夜前触发的定时，星期已经被移到周六，反查时也得对得上
+func TestMatchAcrossMidnight(t *testing.T) {
+	c := &config.Config{Schedules: []config.Schedule{sched("mid", "00:00:02", []int{1})}}
+	// 周一 00:00:02 提前 0 秒 → 触发点周一 00:00
+	got := Match(c, mon(0, 0, 1))
+	if got == nil || got.Name != "mid" {
+		t.Fatalf("跨午夜的定时没匹配上，拿到 %v", got)
+	}
+}
+
+func TestPlistMergesAllSchedules(t *testing.T) {
+	c := &config.Config{Schedules: []config.Schedule{
+		sched("noon", "12:00:00", []int{1, 2}),
+		sched("evening", "18:00:00", []int{1}),
+	}}
+	out := string(Plist("/opt/homebrew/bin/gong", c.Schedules))
+
+	// 只能有一个 job
+	if n := strings.Count(out, "<key>Label</key>"); n != 1 {
+		t.Errorf("Label 出现 %d 次，应该只有 1 次", n)
+	}
+	if !strings.Contains(out, "<string>local.gong</string>") {
+		t.Error("label 应该是 local.gong，不带定时名")
+	}
+	// 三个触发点：周一12点、周二12点、周一18点
+	if n := strings.Count(out, "<key>Weekday</key>"); n != 3 {
+		t.Errorf("触发点 %d 个，应该 3 个", n)
+	}
+	// fire 不带名字
+	if strings.Contains(out, "<string>noon</string>") {
+		t.Error("ProgramArguments 不该带定时名")
+	}
+	// 登录时绝不能跑
+	if !strings.Contains(out, "<key>RunAtLoad</key>\n  <false/>") {
+		t.Error("RunAtLoad 必须是 false")
+	}
+}
+
+// 两条定时撞在同一分钟时只能留一个触发点，否则 launchd 叫醒两次、叠两个浮层
+func TestPlistDedupesSameMinute(t *testing.T) {
+	c := &config.Config{Schedules: []config.Schedule{
+		sched("a", "12:00:00", []int{1}),
+		sched("b", "12:00:30", []int{1}),
+	}}
+	out := string(Plist("/opt/homebrew/bin/gong", c.Schedules))
+	if n := strings.Count(out, "<key>Weekday</key>"); n != 1 {
+		t.Errorf("同一分钟的触发点 %d 个，应该去重成 1 个", n)
+	}
+}
+
+func TestPlistSkipsDisabled(t *testing.T) {
+	c := &config.Config{Schedules: []config.Schedule{
+		sched("on", "12:00:00", []int{1}),
+		sched("off", "18:00:00", []int{1}),
+	}}
+	c.Schedules[1].Enabled = false
+	out := string(Plist("/opt/homebrew/bin/gong", c.Schedules))
+	if n := strings.Count(out, "<key>Weekday</key>"); n != 1 {
+		t.Errorf("停用的定时不该进 plist，触发点有 %d 个", n)
+	}
+}
+
+// 新的 local.gong.plist 自己也长得像 local.gong.<name>.plist，
+// 清理旧文件时绝不能把它当成遗留物删掉。
+func TestLegacyScanIgnoresCurrentPlist(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	agents := filepath.Join(dir, "Library", "LaunchAgents")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"local.gong.plist", "local.gong.noon.plist", "local.gong.evening.plist"} {
+		if err := os.WriteFile(filepath.Join(agents, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := legacyInstalled()
+	want := []string{"evening", "noon"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("扫到 %v，应该只有 %v（不含当前那份 local.gong.plist）", got, want)
 	}
 }

@@ -167,7 +167,7 @@ CLI 二进制     gong          (Go + Bubble Tea)
 配置          ~/.config/gong/config.toml
 用户主题       ~/.config/gong/themes/<name>/{index.html,theme.toml}
 内置主题       $(brew --prefix)/share/gong/themes/<name>/
-launchd       ~/Library/LaunchAgents/local.gong.<name>.plist
+launchd       ~/Library/LaunchAgents/local.gong.plist（所有定时共用一个）
 ```
 
 命令形态（用子命令，不用 `-set` 这种单横线接单词）：
@@ -188,7 +188,29 @@ gong stop                 # 掐掉正在播的浮层（pkill -x gong-overlay）
 
 **不需要任何常驻进程。** launchd 本身就是那个常驻的东西，而且已经在跑了。TUI 按需拉起编辑完退出，`vis` 按需拉起播完退出。只有事件驱动触发（而非定时）才需要守护进程，当前不需要。
 
-**多条定时** = 每条生成一个独立 plist，label `local.gong.<name>`。`gong ls` 读 `~/Library/LaunchAgents/local.gong.*`，`gong rm` 就是 `launchctl bootout` + 删文件。
+### 所有定时共用一个 plist，不是一条一个
+
+**这条推翻了早先的写法**（早先是「每条定时一个独立 plist，label `local.gong.<name>`」）。
+
+原因是 macOS 13 之后会把**每一个第三方 LaunchAgent** 单独列进「系统设置 → 通用 → 登录项与扩展 → 允许在后台」。一条定时一个 plist 就意味着 N 条定时在那里排出 N 个**一模一样的「gong」**：
+
+```
+Name: gong   Identifier: 8.local.gong.noon
+Name: gong   Identifier: 8.local.gong.evening
+```
+
+用户既分不清谁是谁，还可能顺手关掉一个——**关掉之后我们完全无从知晓**，`gong ls` 照样显示已接管，那条提醒就静悄悄地不响了。
+
+`StartCalendarInterval` 本来就是个数组，装多少个「星期几 + 几点几分」都行。所以现在是一个 label `local.gong`，把所有启用定时的触发点并进去，后台项永远只占一个。
+
+两个连带好处：
+
+- **同一分钟的触发点会去重**。以前两条定时撞在同一分钟，launchd 会叫醒两次，屏幕上叠两个浮层。
+- plist 内容更简单，`gong fire` 也不带参数了。
+
+代价是 launchd 不再告诉我们是哪条定时触发的，`gong fire` 得按当前时间反查最近的那条（`agent.Match`）。猜错也不至于出事——壳自己的时间窗判断会把不该放的挡掉。
+
+**升级要清理**：0.1.0 装过的 `local.gong.<name>.plist` 会在 `gong on` 时被 bootout 并删除。扫描时**必须排掉 `local.gong.plist` 自己**——它也符合 `local.gong.*.plist` 这个形状，不排掉就会在写完新 plist 之后立刻把它当遗留物删了（写这段时踩了，已加回归测试）。
 
 ### launchd 调 `gong fire <name>`，不直接调 `gong-overlay`
 

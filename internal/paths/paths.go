@@ -32,14 +32,25 @@ func UserThemes() string { return filepath.Join(ConfigDir(), "themes") }
 
 func LaunchAgents() string { return filepath.Join(home(), "Library", "LaunchAgents") }
 
-func PlistFile(name string) string {
-	return filepath.Join(LaunchAgents(), Label(name)+".plist")
+// Label 是唯一那个 launchd job 的名字。
+//
+// 所有定时共用一个 plist，不是一条一个。原因是 macOS 13 之后会把每个第三方
+// LaunchAgent 单独列进「登录项与扩展 → 允许在后台」，一条定时一个 plist 就意味着
+// N 条定时在系统设置里排出 N 个一模一样的「gong」，用户既分不清也可能顺手关掉一个
+// ——关掉之后我们完全无从知晓，那条提醒就静悄悄地不响了。
+const Label = "local.gong"
+
+func PlistFile() string { return filepath.Join(LaunchAgents(), Label+".plist") }
+
+// LegacyLabel 是 0.1.0 用过的一条一个 plist 的命名，升级时要清理掉。
+func LegacyLabel(name string) string { return "local.gong." + name }
+
+func LegacyPlistFile(name string) string {
+	return filepath.Join(LaunchAgents(), LegacyLabel(name)+".plist")
 }
 
-func Label(name string) string { return "local.gong." + name }
-
 // LogFile 是 launchd 把 stderr 倒进去的地方。主题里的 console.log 和壳的报错都落在这。
-func LogFile(name string) string { return filepath.Join(os.TempDir(), "gong."+name+".err") }
+func LogFile() string { return filepath.Join(os.TempDir(), "gong.err") }
 
 func exeDir() string {
 	exe, err := os.Executable()

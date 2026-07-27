@@ -1,9 +1,10 @@
 // gong —— 定时全屏浮层提醒。
 //
 // 分层：
-//   壳 (gong-overlay)  计时、拉起主题、给主题提供能力
-//   Go (gong)          配置、TUI、launchd 接管
-//   主题                纯 HTML/CSS，表现力在设计上
+//
+//	壳 (gong-overlay)  计时、拉起主题、给主题提供能力
+//	Go (gong)          配置、TUI、launchd 接管
+//	主题                纯 HTML/CSS，表现力在设计上
 //
 // 常驻进程数为 0：launchd 本来就在跑，到点拉起 gong fire，播完自杀。
 package main
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/xwvike/gong/internal/agent"
 	"github.com/xwvike/gong/internal/config"
@@ -125,14 +127,13 @@ func install(c *config.Config) error {
 		return fmt.Errorf("找不到 gong-overlay（找过 %s 和可执行文件同级目录）", paths.OverlayPath)
 	}
 	res := agent.Sync(c, self)
-	for _, n := range res.Removed {
-		fmt.Println("已卸载", n)
+	for _, n := range res.Cleaned {
+		fmt.Println("已清掉旧版遗留的 plist:", n)
 	}
-	for _, n := range res.Installed {
+	for _, n := range res.Active {
 		s, _ := c.Find(n)
-		th, _ := theme.Resolve(s.Theme)
-		tr := agent.ComputeTrigger(s.Seconds(), th.LeadSeconds(), s.Weekdays)
-		fmt.Printf("已接管 %-10s %s %s  主题 %s  (launchd 在 %02d:%02d 叫醒)\n",
+		tr := agent.TriggerFor(*s)
+		fmt.Printf("%-10s %s %s  主题 %-8s (launchd 在 %02d:%02d 叫醒)\n",
 			n, s.At, s.WeekdaysLabel(), s.Theme, tr.Hour, tr.Minute)
 	}
 	for _, e := range res.Errors {
@@ -141,9 +142,13 @@ func install(c *config.Config) error {
 	if len(res.Errors) > 0 {
 		return fmt.Errorf("有 %d 条没装上", len(res.Errors))
 	}
-	if len(res.Installed) == 0 {
-		fmt.Println("没有启用中的定时。跑 gong set 加一条。")
+	if res.Removed {
+		fmt.Println("没有启用中的定时，已从 launchd 撤出。跑 gong set 加一条。")
+		return nil
 	}
+	// 所有定时共用一个 launchd job，所以系统设置的「登录项与扩展」里
+	// 永远只有一个 gong，不管你配了几条。
+	fmt.Printf("\n以上 %d 条已交给 launchd（%s，后台项只占一个）\n", len(res.Active), paths.Label)
 	return nil
 }
 
@@ -197,33 +202,31 @@ func cmdLs() error {
 		fmt.Println("一条定时都没有。")
 		return nil
 	}
-	fmt.Printf("%-12s %-9s %-8s %-10s %-8s %s\n", "名字", "时间", "星期", "主题", "配置", "实际")
+	fmt.Printf("%-12s %-9s %-8s %-10s %-8s %s\n", "名字", "时间", "星期", "主题", "状态", "launchd 叫醒")
 	for _, s := range c.Schedules {
 		state := "停用"
 		if s.Enabled {
 			state = "启用"
 		}
-		actual := "未接管"
-		if agent.Loaded(s.Name) {
-			actual = "已接管"
+		wake := "—"
+		if s.Enabled {
+			tr := agent.TriggerFor(s)
+			wake = fmt.Sprintf("%02d:%02d", tr.Hour, tr.Minute)
 		}
 		note := ""
 		if _, err := theme.Resolve(s.Theme); err != nil {
 			note = "  ← 主题找不到"
 		}
 		fmt.Printf("%-12s %-9s %-8s %-10s %-8s %s%s\n",
-			s.Name, s.At, s.WeekdaysLabel(), s.Theme, state, actual, note)
+			s.Name, s.At, s.WeekdaysLabel(), s.Theme, state, wake, note)
 	}
 
-	// 配置里没有、但磁盘上还躺着的 plist——通常是手改配置文件留下的
-	known := map[string]bool{}
-	for _, s := range c.Schedules {
-		known[s.Name] = true
-	}
-	for _, n := range agent.Installed() {
-		if !known[n] {
-			fmt.Printf("%-12s %s\n", n, "(配置里没有，但 plist 还在——跑 gong on 会清掉)")
-		}
+	// 所有定时共用一个 launchd job，所以接管状态是全局的一个。
+	fmt.Println()
+	if agent.Loaded() {
+		fmt.Printf("launchd：已接管（%s，系统设置的后台项里只占一个）\n", paths.Label)
+	} else {
+		fmt.Println("launchd：未接管 —— 跑 gong on")
 	}
 	return nil
 }
@@ -243,14 +246,9 @@ func cmdRm(args []string) error {
 	if err := c.Save(); err != nil {
 		return err
 	}
-	if err := agent.Bootout(name); err != nil {
-		return err
-	}
-	if err := os.Remove(paths.PlistFile(name)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
 	fmt.Println("已删除", name)
-	return nil
+	// 定时是共用一个 plist 的，删一条要重新生成整份
+	return install(c)
 }
 
 func cmdThemes() error {
@@ -313,17 +311,25 @@ func cmdStop() error {
 // 所以让 launchd 调 gong 而不是直接调 gong-overlay。
 // 最后用 syscall.Exec 把自己换成壳，不留多余进程。
 func cmdFire(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("gong fire <name>")
-	}
-	name := args[0]
 	c, err := config.Load()
 	if err != nil {
 		return err
 	}
-	s, _ := c.Find(name)
-	if s == nil {
-		return fmt.Errorf("配置里没有定时 %q", name)
+
+	var s *config.Schedule
+	if len(args) > 0 {
+		// 带名字的调法只为兼容 0.1.0 遗留的 per-name plist，
+		// 那些 plist 会在下次 gong on 时被清掉。
+		if s, _ = c.Find(args[0]); s == nil {
+			return fmt.Errorf("配置里没有定时 %q", args[0])
+		}
+	} else {
+		// 所有定时共用一个 job，launchd 不会告诉我们是谁触发的，按时间反查。
+		// 猜错也不至于出事：壳自己的时间窗判断会把不该放的挡掉。
+		s = agent.Match(c, time.Now())
+		if s == nil {
+			return nil // 一条启用的都没有，安静退出
+		}
 	}
 	if !s.Enabled {
 		return nil // 停用了就安静退出，不该是错误

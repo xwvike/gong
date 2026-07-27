@@ -15,6 +15,10 @@ gong on
 
 **卸载前请先 `gong off`** —— `brew uninstall` 不会清 `~/Library/LaunchAgents` 里的 plist。
 
+装完你会在「系统设置 → 通用 → 登录项与扩展 → 允许在后台」里看到**一个**叫 gong 的条目。
+不管配了多少条定时都只有一个，而且它**不会在登录时运行任何东西**（`RunAtLoad` 是 `false`），
+只是告诉 launchd 到点叫醒一次。
+
 ## 用
 
 ```bash
