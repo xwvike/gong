@@ -7,7 +7,7 @@
 ## 装
 
 ```bash
-brew install xwvike/gong/gong
+brew install xwvike/tap/gong
 gong on
 ```
 

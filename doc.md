@@ -20,8 +20,8 @@ Swift 壳已重构完成并实测通过，两个主题跑通了完整契约。**
 | 多显示器 | ⚠️ 未验证（无外接屏），代码是每块屏建一个 panel |
 | 环境 | macOS 26.5.2 / Apple silicon / Swift 6.3.3 |
 
-**已经发到 brew 上了**：`brew install xwvike/gong/gong` 装完即用。
-仓库 github.com/xwvike/gong，tap github.com/xwvike/homebrew-gong，v0.1.0。
+**已经发到 brew 上了**：`brew install xwvike/tap/gong` 装完即用。
+仓库 github.com/xwvike/gong，tap github.com/xwvike/homebrew-tap（本来就有的那个，不要另建），v0.1.0。
 
 实测过的分发链路：CI 出 universal binary（两个二进制都是 x86_64 + arm64 fat）→
 release sha256 独立复核一致 → brew 装完 **没有 com.apple.quarantine**、
@@ -136,7 +136,7 @@ Go 侧 `GOARCH=arm64/amd64` 各来一份再 `lipo`。
 所以 plist 由 `gong` 自己生成和 bootstrap。用户视角两步：
 
 ```bash
-brew install xwvike/gong/gong
+brew install xwvike/tap/gong
 gong on
 ```
 
@@ -161,7 +161,7 @@ Go 侧按这个顺序找内置主题：ldflags 注入的 → `bin/../share/gong/
 
 ```
 仓库          github.com/xwvike/gong
-tap           homebrew-gong
+tap           homebrew-tap        （已有仓库，gong 只是加一个 Formula/gong.rb）
 CLI 二进制     gong          (Go + Bubble Tea)
 渲染二进制     gong-overlay  (Swift)
 配置          ~/.config/gong/config.toml
@@ -333,7 +333,7 @@ window.gong = {
 - [x] Go CLI：`on/off/set/ls/rm/vis/stop/fire/themes`，配置、主题解析、plist 生成、launchctl 接管
 - [x] Bubble Tea TUI：增删改查、启停、换主题、预览
 - [x] CI 预编译 universal binary + Homebrew formula
-- [x] 开仓库、发 v0.1.0、建 tap，`brew install xwvike/gong/gong` 已验证可用
+- [x] 开仓库、发 v0.1.0、formula 进 tap，`brew install xwvike/tap/gong` 已验证可用
 - [ ] **装 launchd，实际用一周**，确认自己还想要它
 - [ ] **写「收摊」脚本并接进触发流程**（挂在 `cmd/gong/main.go` 的 `cmdFire` 里，已经留好位置）。纯动画的提醒半个月后一定会被无视，真正改变行为的是替用户收摊：
   ```bash
@@ -350,10 +350,11 @@ window.gong = {
 ```bash
 git tag v0.1.0 && git push origin v0.1.0     # CI 自动出 universal tarball 和 sha256
 # 把 packaging/gong.rb 拷到 tap 仓库 Formula/gong.rb，填上 release 里的 sha256
-brew install xwvike/gong/gong && gong on
+brew install xwvike/tap/gong && gong on
 ```
 
-tap 仓库必须叫 `homebrew-gong`，这样 `brew install xwvike/gong/gong` 才认。
+tap 用的是**已有的** `xwvike/homebrew-tap`（brew 里叫 `xwvike/tap`），gong 只是往里加一个 `Formula/gong.rb`，
+跟里面 goreleaser 自动维护的 `Casks/local-mirror.rb` 互不干扰。
 
 ### 关于退出入口（推迟，但结论先记着）
 
@@ -397,3 +398,6 @@ swiftc -O overlay.swift -o gong-overlay
   更值得记的是**怎么发现的**：`git add -A` 之后我打印了 staged 列表却没逐项核对。可靠的做法是拿 `git ls-files` 跟磁盘 `find` 做 `comm -23` 差集，空集才算齐。
 - **CI 的 Go 版本别写死**，用 `go-version-file: go.mod`，否则 `go.mod` 一升版就挂。
 - **release 的 sha256 要自己下载复核一遍**，不要直接抄 CI 输出的那行——formula 里填错 sha 的表现是所有人都装不上。
+- **发版前先看看仓库里已经有什么。** 我照 doc 里那句「tap `homebrew-gong`」直接建了个新 tap，其实 `xwvike/homebrew-tap` 早就存在（goreleaser 在维护 local-mirror 的 cask）。而 doc 当时是**自相矛盾**的——第六节写 tap 叫 `homebrew-gong`，安装命令却写着 `xwvike/tap/gong`；我把矛盾按「改命令迁就仓库名」解决了，正好改反。
+  文档内部打架时，**去查现实**（`gh repo list`）再决定听谁的，不要挑一个顺手的。
+  顺带：`xwvike/tap` 这种通用 tap 名也比一个软件一个 tap 好——多个软件共用一个 tap 是 Homebrew 的常规做法。

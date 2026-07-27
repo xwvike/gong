@@ -1,6 +1,6 @@
-# 这份文件属于 tap 仓库 github.com/xwvike/homebrew-gong，
-# 放在这里是为了跟源码一起版本化。发版时拷到 tap 的 Formula/gong.rb，
-# 把 sha256 换成 release 里那个。
+# 这份文件的部署目标是 github.com/xwvike/homebrew-tap 的 Formula/gong.rb
+# （brew 里叫 xwvike/tap，是已有的 tap，不要为 gong 另建一个）。
+# 放在源码里是为了跟版本一起管。发版时拷过去，把 sha256 换成 release 里那个。
 #
 # 三条不能破的规矩：
 #   1. 必须是 formula，永远不要做成 cask。Gatekeeper 这轮收紧只影响 cask；
