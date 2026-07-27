@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,6 +39,8 @@ func main() {
 		err = cmdOn()
 	case "off":
 		err = cmdOff()
+	case "uninstall":
+		err = cmdUninstall(args[1:])
 	case "set":
 		err = cmdSet()
 	case "ls":
@@ -69,13 +72,17 @@ func usage() {
 	fmt.Print(`gong —— 到点在所有屏幕最顶层播一段动画，不抢焦点、不吃点击
 
   gong on            写默认配置并接管 launchd（装完跑这一条就能用）
-  gong off           卸掉所有定时（brew uninstall 之前跑这条）
   gong set           TUI：增删改查定时、选主题、预览
   gong ls            列出定时和它们的实际状态
   gong rm <name>     删掉一条定时
   gong vis <theme>   预览一个主题
   gong stop          掐掉正在播的浮层
   gong themes        列出可用主题
+
+  gong off           从 launchd 撤出，但保留配置和程序（想暂停一阵子用这个）
+  gong uninstall     一条龙卸干净：清 plist、清配置、最后自动跑 brew uninstall
+      --purge        连 ~/.config/gong 一起删（含你自己写的主题）
+      -y             不用确认
 
 默认两条定时：noon 12:00、evening 18:00，周一到周五。
 `)
@@ -165,6 +172,140 @@ func cmdOff() error {
 	}
 	fmt.Println("配置留在", paths.ConfigFile(), "——再跑 gong on 就能装回来。")
 	return nil
+}
+
+// cmdUninstall 是「我不要这个东西了」的一条龙。
+//
+// 存在的理由：formula 没有 uninstall hook，`brew uninstall` 不会清
+// ~/Library/LaunchAgents 里的 plist。光靠 caveats 提醒用户先跑 gong off
+// 是不够的——没人看 caveats，留下的 plist 会每天到点去拉一个不存在的二进制，
+// 而且是静默失败。所以把清理和卸载合成一条命令，让人没机会漏掉前半截。
+func cmdUninstall(args []string) error {
+	purge, yes := false, false
+	for _, a := range args {
+		switch a {
+		case "--purge":
+			purge = true
+		case "-y", "--yes":
+			yes = true
+		default:
+			return fmt.Errorf("不认识的参数 %q（gong uninstall [--purge] [-y]）", a)
+		}
+	}
+
+	brewPath, formulaName := brewInstall()
+
+	fmt.Println("将要：")
+	fmt.Println("  · 掐掉正在播的浮层")
+	fmt.Println("  · 从 launchd 撤出，删掉 ~/Library/LaunchAgents/local.gong*.plist")
+	if purge {
+		fmt.Printf("  · 删掉 %s（%s）\n", paths.ConfigDir(), userThemeNote())
+	} else {
+		fmt.Printf("  · 保留 %s（要一并删加 --purge）\n", paths.ConfigDir())
+	}
+	if brewPath != "" {
+		fmt.Printf("  · 执行 brew uninstall %s\n", formulaName)
+	} else {
+		fmt.Println("  · 不是 brew 装的，程序本体要你自己删")
+	}
+
+	if !yes && !confirm("确定吗？[y/N] ") {
+		fmt.Println("取消了，什么都没动。")
+		return nil
+	}
+
+	// 正在播的话先掐掉，免得卸完还挂在屏幕上
+	_ = exec.Command("pkill", "-x", "gong-overlay").Run()
+
+	removed, errs := agent.RemoveAll()
+	for _, n := range removed {
+		fmt.Println("已卸载", n)
+	}
+	for _, e := range errs {
+		fmt.Fprintln(os.Stderr, "  !", e)
+	}
+
+	if purge {
+		if err := os.RemoveAll(paths.ConfigDir()); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "  ! 删配置失败：", err)
+		} else {
+			fmt.Println("已删除", paths.ConfigDir())
+		}
+	}
+
+	if brewPath == "" {
+		fmt.Println("\nlaunchd 那边已经干净了。程序本体不是 brew 装的，自己删：")
+		if p := paths.Overlay(); p != "" {
+			fmt.Println("  ", p)
+		}
+		if exe, err := os.Executable(); err == nil {
+			fmt.Println("  ", exe)
+		}
+		return nil
+	}
+
+	// 用 exec 换掉自己：进程映像已经变成 brew 了，
+	// 它接下来删掉 /opt/homebrew/bin/gong 完全没有「删正在跑的文件」这个问题。
+	fmt.Printf("\n$ brew uninstall %s\n", formulaName)
+	return syscall.Exec(brewPath, []string{"brew", "uninstall", formulaName}, os.Environ())
+}
+
+// brewInstall 判断当前这个 gong 是不是 brew 装的，是的话返回 brew 的路径和 formula 名。
+// 判据是可执行文件在不在 brew 前缀底下——比问 `brew list` 准，
+// 因为源码编译出来的 gong 和 brew 装的可能同时存在。
+func brewInstall() (brewPath, formula string) {
+	brewPath, err := exec.LookPath("brew")
+	if err != nil {
+		return "", ""
+	}
+	out, err := exec.Command(brewPath, "--prefix").Output()
+	if err != nil {
+		return "", ""
+	}
+	prefix := strings.TrimSpace(string(out))
+	exe, err := os.Executable()
+	if err != nil {
+		return "", ""
+	}
+	if abs, err := filepath.Abs(exe); err == nil {
+		exe = abs
+	}
+	if !strings.HasPrefix(exe, prefix+string(filepath.Separator)) {
+		return "", ""
+	}
+	// tap 里的 formula 全名，卸载时用短名就够
+	return brewPath, "gong"
+}
+
+func userThemeNote() string {
+	entries, err := os.ReadDir(paths.UserThemes())
+	if err != nil {
+		return "没有自定义主题"
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			n++
+		}
+	}
+	if n == 0 {
+		return "没有自定义主题"
+	}
+	return fmt.Sprintf("含 %d 个你自己写的主题！", n)
+}
+
+func confirm(prompt string) bool {
+	fmt.Print(prompt)
+	r := bufio.NewReader(os.Stdin)
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return false // 非交互环境（管道、launchd）一律当成否
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
 }
 
 func cmdSet() error {

@@ -180,7 +180,21 @@ gong vis <theme>          # 预览
 gong ls                   # 列出已注册定时
 gong rm <name>            # 删除某条定时
 gong stop                 # 掐掉正在播的浮层（pkill -x gong-overlay）
+gong uninstall            # 一条龙卸干净，最后自动 exec 到 brew uninstall
 ```
+
+`off` 和 `uninstall` 是两件事：`off` 只从 launchd 撤出、程序和配置都留着（想暂停一阵子）；
+`uninstall` 是不要了。
+
+**为什么卸载要单独做一条命令**：formula 没有 uninstall hook，光在 caveats 里写「卸载前先跑 gong off」
+是不够的——没人看 caveats，留下的 plist 会每天到点去拉一个不存在的二进制，而且是静默失败。
+把清理和卸载合成一条，用户就没机会漏掉前半截。
+
+最后一步用 `syscall.Exec` 换成 brew：进程映像已经变成 brew 了，它接下来删掉
+`/opt/homebrew/bin/gong` 完全没有「删正在跑的文件」这个问题。
+
+判断是不是 brew 装的，看**可执行文件在不在 `brew --prefix` 底下**，别去问 `brew list`
+——源码编译的和 brew 装的可能同时存在，问 `brew list` 会把源码跑的那个也误判成 brew 装的。
 
 默认两条定时：`noon` 12:00、`evening` 18:00，周一到周五。
 

@@ -13,7 +13,20 @@ gong on
 
 `gong on` 之后立刻可用，不用重启也不用登出。默认两条定时：中午 12:00、傍晚 18:00，周一到周五。
 
-**卸载前请先 `gong off`** —— `brew uninstall` 不会清 `~/Library/LaunchAgents` 里的 plist。
+## 卸
+
+```bash
+gong uninstall
+```
+
+清 plist、从 launchd 撤出，最后自动帮你跑 `brew uninstall`。加 `--purge` 连
+`~/.config/gong`（含你自己写的主题）一起删，加 `-y` 跳过确认。
+
+**别直接 `brew uninstall gong`** —— formula 没有 uninstall hook，
+`~/Library/LaunchAgents` 里的 plist 会留下来，每天到点去拉一个不存在的二进制，
+而且是静默失败。
+
+只想暂停一阵子、程序留着：`gong off`。
 
 装完你会在「系统设置 → 通用 → 登录项与扩展 → 允许在后台」里看到**一个**叫 gong 的条目。
 不管配了多少条定时都只有一个，而且它**不会在登录时运行任何东西**（`RunAtLoad` 是 `false`），
