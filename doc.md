@@ -20,9 +20,15 @@ Swift 壳已重构完成并实测通过，两个主题跑通了完整契约。**
 | 多显示器 | ⚠️ 未验证（无外接屏），代码是每块屏建一个 panel |
 | 环境 | macOS 26.5.2 / Apple silicon / Swift 6.3.3 |
 
-Go CLI 和 TUI 已经能跑通完整链路，launchd 接管走假 HOME 端到端验过（装 → kickstart 被时间窗拒 → 真实触发播放 → 卸载无残留）。
+**已经发到 brew 上了**：`brew install xwvike/gong/gong` 装完即用。
+仓库 github.com/xwvike/gong，tap github.com/xwvike/homebrew-gong，v0.1.0。
 
-未做：开仓库发版、实际用一周、收摊脚本、用户退出入口、多屏实测。
+实测过的分发链路：CI 出 universal binary（两个二进制都是 x86_64 + arm64 fat）→
+release sha256 独立复核一致 → brew 装完 **没有 com.apple.quarantine**、
+`Signature=adhoc, linker-signed` → 安装过程完全没碰 home →
+从 Cellar 直接调 `gong on`，plist 里写的是 `/opt/homebrew/bin/gong`（不带版本号）。
+
+未做：实际用一周、收摊脚本、用户退出入口、多屏实测。
 
 ## 一·五、分层（想清楚了再动手）
 
@@ -327,7 +333,7 @@ window.gong = {
 - [x] Go CLI：`on/off/set/ls/rm/vis/stop/fire/themes`，配置、主题解析、plist 生成、launchctl 接管
 - [x] Bubble Tea TUI：增删改查、启停、换主题、预览
 - [x] CI 预编译 universal binary + Homebrew formula
-- [ ] **开仓库、发第一个 tag、建 tap** —— 见下面「发版怎么走」
+- [x] 开仓库、发 v0.1.0、建 tap，`brew install xwvike/gong/gong` 已验证可用
 - [ ] **装 launchd，实际用一周**，确认自己还想要它
 - [ ] **写「收摊」脚本并接进触发流程**（挂在 `cmd/gong/main.go` 的 `cmdFire` 里，已经留好位置）。纯动画的提醒半个月后一定会被无视，真正改变行为的是替用户收摊：
   ```bash
@@ -382,3 +388,12 @@ swiftc -O overlay.swift -o gong-overlay
 ```
 
 `--force` 跳过时间窗和全屏判断，是 `gong vis` 的雏形。主题里的 `console.log` 和未捕获异常会打到 stderr，前缀 `gong-overlay[js]`。
+
+---
+
+## 十、发版踩的坑
+
+- **`.gitignore` 的模式不带前导 `/` 会匹配任意层级。** 写了 `gong` 想忽略根目录的编译产物，结果把 `cmd/gong/` 整个目录也忽略了，初版提交里没有 Go 的 main 包，CI 在 `go build ./cmd/gong` 直接挂。产物模式一律写成 `/gong` 这种锚定形式。
+  更值得记的是**怎么发现的**：`git add -A` 之后我打印了 staged 列表却没逐项核对。可靠的做法是拿 `git ls-files` 跟磁盘 `find` 做 `comm -23` 差集，空集才算齐。
+- **CI 的 Go 版本别写死**，用 `go-version-file: go.mod`，否则 `go.mod` 一升版就挂。
+- **release 的 sha256 要自己下载复核一遍**，不要直接抄 CI 输出的那行——formula 里填错 sha 的表现是所有人都装不上。
