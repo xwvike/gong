@@ -1,0 +1,7 @@
+# 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
+name      = "闸门"
+desc      = "上下两道闸门压进来，文字逐字砸下，五秒后收回。中间留空不挡视线。"
+lead      = 0      # 提前多少秒亮相。0 = 整点出现
+duration  = 6      # 预期可见时长（秒）。壳的兜底 = duration + 余量，且不超过 60
+placement = "edge" # center / edge / corner —— 给 TUI 提示会不会挡住正在看的东西
+webgl     = false

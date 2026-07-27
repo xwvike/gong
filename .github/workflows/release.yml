@@ -1,0 +1,78 @@
+name: release
+
+# 打 tag 就出预编译产物。走预编译而不是让 formula 现场编译，
+# 因为目标是给别人用：源码构建要拉 250M 的 Go 并要求装 Xcode CLT，
+# 对非开发者是致命摩擦。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 版本号
+        id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 编译 gong-overlay（universal）
+        run: |
+          set -euxo pipefail
+          swiftc -O -target arm64-apple-macos12  overlay.swift -o overlay-arm64
+          swiftc -O -target x86_64-apple-macos12 overlay.swift -o overlay-x86
+          lipo -create overlay-arm64 overlay-x86 -o gong-overlay
+          lipo -info gong-overlay
+          # linker 会自动打 ad-hoc 签名，足够在 Apple Silicon 上执行，
+          # 不需要 99 刀开发者账号。formula 下载不打 quarantine，所以不会弹 Gatekeeper。
+          codesign -dv gong-overlay 2>&1 | grep -i adhoc
+
+      - name: 编译 gong（universal）
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -euxo pipefail
+          # 这里【不】注入 overlayPath/builtinThemes：那是 formula 的活儿，
+          # 它才知道 opt 前缀在哪。release 包里靠「跟可执行文件同目录」回落。
+          LD="-s -w -X github.com/xwvike/gong/internal/paths.Version=${V}"
+          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$LD" -o gong-arm64 ./cmd/gong
+          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "$LD" -o gong-amd64 ./cmd/gong
+          lipo -create gong-arm64 gong-amd64 -o gong
+          lipo -info gong
+
+      - name: 打包
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -euxo pipefail
+          mkdir -p "dist/gong-${V}"
+          cp gong gong-overlay "dist/gong-${V}/"
+          cp -R themes "dist/gong-${V}/"
+          cp doc.md README.md "dist/gong-${V}/" 2>/dev/null || true
+          tar -C dist -czf "gong-${V}-macos-universal.tar.gz" "gong-${V}"
+          shasum -a 256 "gong-${V}-macos-universal.tar.gz" | tee sha256.txt
+
+      - name: 冒烟测试
+        run: |
+          set -euxo pipefail
+          ./gong version
+          ./gong themes
+          # --force 不看时间窗，能跑通就说明壳和主题都完好
+          ./gong-overlay --force --timeout 3 --theme themes/default/index.html
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            gong-*-macos-universal.tar.gz
+            sha256.txt
+          body_path: sha256.txt

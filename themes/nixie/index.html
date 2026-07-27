@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>gong · nixie</title>
+<style>
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden;
+               -webkit-user-select:none; cursor:none; }
+
+  :root {
+    --lit:   #ff7a18;   /* 灯丝亮起来的橙 */
+    --core:  #ffd9a8;   /* 电弧最亮处几乎发白 */
+    --unlit: rgba(255,140,60,.055);  /* 没通电的另外九根丝，只剩极淡的轮廓 */
+  }
+
+  /* 整排管子悬在屏幕正中。没有玻璃管、没有底座、没有背景板——
+     只留灯丝，其余全是桌面。 */
+  .rig { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+         gap:.06em; font:400 clamp(64px,13vh,200px)/1 "DIN Alternate","Avenir Next Condensed",
+                          "Helvetica Neue",sans-serif;
+         opacity:0; transform:scale(.985); will-change:opacity; }
+
+  .tube  { position:relative; width:.60em; height:1em; }
+  .glyph { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+           color:transparent; -webkit-text-stroke:1.5px var(--unlit); }
+
+  /* 通电的那一根：描边换成亮橙，再叠三层 drop-shadow 把辉光推出去。
+     用 drop-shadow 不用 text-shadow —— 前者作用在渲染结果上，
+     字面是透明的，所以光只从灯丝本身发出来，不会糊成一坨实心字。 */
+  .glyph.lit { -webkit-text-stroke:1.5px var(--core);
+               filter:drop-shadow(0 0 3px var(--lit))
+                      drop-shadow(0 0 12px rgba(255,122,24,.85))
+                      drop-shadow(0 0 34px rgba(255,90,10,.45)); }
+
+  /* 真辉光管有轻微不稳，完全稳定反而假。
+     但这个动画【必须挂在 .rig 上，不能挂在带 filter 的字上】——
+     实测：6 个带三层 drop-shadow 的字各自跑 opacity 动画会把主线程压死，
+     一个 2600ms 的 setTimeout 能拖到 6.4 秒甚至永远不来。
+     整排一起抖反而更像市电纹波，还只有一个合成层。 */
+  @keyframes flicker {
+    0%,7%,9%,53%,55%,100% { opacity:1; }
+    8%   { opacity:.84; }
+    54%  { opacity:.92; }
+  }
+
+  .sep { display:flex; flex-direction:column; justify-content:center; gap:.22em;
+         width:.2em; height:1em; align-items:center; }
+  .sep i { width:.055em; height:.055em; border-radius:50%; background:var(--core);
+           filter:drop-shadow(0 0 4px var(--lit)) drop-shadow(0 0 14px rgba(255,122,24,.8)); }
+
+  .msg { position:fixed; left:0; right:0; top:calc(50% + 9vh); text-align:center;
+         font:500 clamp(14px,1.5vw,24px)/1 "PingFang SC",-apple-system,sans-serif;
+         letter-spacing:.5em; text-indent:.5em; color:var(--lit);
+         filter:drop-shadow(0 0 10px rgba(255,122,24,.6));
+         opacity:0; }
+
+  /* 页面被壳提前加载好，动画一律等 reveal */
+  html.gong-live .rig { animation:warmup 1.1s cubic-bezier(.3,.7,.3,1) forwards,
+                                  flicker 3.1s steps(1,end) 1.1s infinite; }
+  @keyframes warmup { to { opacity:1; transform:none; } }
+
+  /* 到点：整排猛地过载一下，然后文字浮出来 */
+  html.gong-live .rig.fired .glyph.lit {
+    animation:none;
+    -webkit-text-stroke-color:#fff;
+    filter:drop-shadow(0 0 6px var(--core))
+           drop-shadow(0 0 26px var(--lit))
+           drop-shadow(0 0 70px rgba(255,90,10,.7));
+    transition:filter .5s ease-out, -webkit-text-stroke-color .5s ease-out;
+  }
+  html.gong-live .rig.fired ~ .msg { animation:rise .8s ease-out .25s forwards; }
+  @keyframes rise { from { opacity:0; transform:translateY(.35em); }
+                    to   { opacity:1; transform:none; } }
+
+  html.gong-live .rig.done      { animation:cool .9s ease-in forwards; }
+  html.gong-live .rig.done ~ .msg { animation:cool .9s ease-in forwards; }
+  /* from 必须写死 opacity:1 —— 换动画会丢掉 warmup / rise 的 forwards 填充值 */
+  @keyframes cool { from { opacity:1; } to { opacity:0; filter:blur(2px); } }
+
+  @media (prefers-reduced-motion:reduce) { * { animation-duration:.01ms !important; } }
+</style>
+</head>
+<body>
+  <div class="rig" id="rig"></div>
+  <!-- 文案写死在主题里，壳不传内容参数。要换话术就复制一份主题改这一行。 -->
+  <div class="msg" id="msg">到点了</div>
+
+<script>
+  const g = window.gong;
+
+  // 多屏时每块屏各跑一份互不知情的实例。时钟只在 0 号屏出现，
+  // 六管辉光在副屏上复制一份既没意义又费电。
+  const primary = g.screen.index === 0;
+
+  const rig = document.getElementById('rig');
+  const msg = document.getElementById('msg');
+
+  if (!primary) {
+    rig.remove(); msg.remove();
+  } else {
+    // 六根管子 HH MM SS，中间两组分隔点
+    const tubes = [];
+    for (let i = 0; i < 6; i++) {
+      if (i === 2 || i === 4) {
+        const sep = document.createElement('div');
+        sep.className = 'sep';
+        sep.innerHTML = '<i></i><i></i>';
+        rig.appendChild(sep);
+      }
+      const tube = document.createElement('div');
+      tube.className = 'tube';
+      // 十个数字全叠在一起，只有一个通电——剩下九根不发光的丝是辉光管的灵魂
+      for (let d = 0; d < 10; d++) {
+        const s = document.createElement('span');
+        s.className = 'glyph';
+        s.textContent = d;
+        tube.appendChild(s);
+      }
+      rig.appendChild(tube);
+      tubes.push(tube);
+    }
+
+    let shown = '';
+    let firedAt = 0;
+
+    // 壳每 100ms 调一次，参数是它那边的当前时间。主题不自己起定时器：
+    // 页面里的 setInterval/setTimeout 在重绘压力下会被拖到几秒甚至不来，
+    // 那样就永远喊不出 done，浮层要挂满 60 秒才被闸门砍。
+    g.onTick = function (now) {
+      const t = new Date(now);
+      const s = String(t.getHours()).padStart(2, '0')
+              + String(t.getMinutes()).padStart(2, '0')
+              + String(t.getSeconds()).padStart(2, '0');
+
+      if (s !== shown) {
+        for (let i = 0; i < 6; i++) {
+          const want = +s[i];
+          const kids = tubes[i].children;
+          for (let d = 0; d < 10; d++) kids[d].classList.toggle('lit', d === want);
+        }
+        shown = s;
+      }
+
+      // 到点后的收尾也按心跳数，不用嵌套 setTimeout
+      if (firedAt) {
+        const since = now - firedAt;
+        if (since >= 2600) rig.classList.add('done');
+        if (since >= 3500) g.done();
+      }
+    };
+
+    // 到点这一下由壳按 target 精确敲，主题不用自己倒数
+    g.onFire = function () {
+      firedAt = g.now || Date.now();   // g.now 由壳每次心跳刷新，别混用两套时钟
+      rig.classList.add('fired');
+    };
+  }
+</script>
+</body>
+</html>

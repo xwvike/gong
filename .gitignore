@@ -1,0 +1,13 @@
+# 编译产物
+gong
+gong-overlay
+overlay-arm64
+overlay-x86
+gong-arm64
+gong-amd64
+dist/
+*.tar.gz
+sha256.txt
+
+*.o
+.DS_Store

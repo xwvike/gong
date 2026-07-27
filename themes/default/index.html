@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>gong · default</title>
+<style>
+  /* 背景必须真透明——壳那边已经关掉 WebView 的绘制背景了 */
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden;
+               -webkit-user-select:none; cursor:none; }
+
+  :root {
+    --ink:   rgba(11,13,17,.94);
+    --amber: #F2C14E;
+    --dim:   rgba(242,193,78,.34);
+  }
+
+  /* 上下两道闸门，从屏幕边缘压进来又收回去。中间留空——
+     不遮住你正在看的东西，是它敢做得这么大的前提。 */
+  .shutter { position:fixed; left:0; right:0; height:26vh; background:var(--ink);
+             transform:translateY(var(--hide)); will-change:transform; }
+  .top    { top:0;    --hide:-100%; }
+  .bottom { bottom:0; --hide:100%; }
+
+  @keyframes slam { to { transform:translateY(0); } }
+  @keyframes lift { to { transform:translateY(var(--hide)); } }
+
+  .hair { position:fixed; left:0; right:0; height:1px; background:var(--amber); opacity:0; }
+  .hair.a { top:26vh; } .hair.b { bottom:26vh; }
+  @keyframes flash { to { opacity:.7; } }
+  @keyframes fade  { to { opacity:0; } }
+
+  .stack { position:fixed; top:0; left:0; right:0; height:26vh;
+           display:flex; flex-direction:column; justify-content:center;
+           padding-left:7vw; gap:.4rem; }
+
+  .eyebrow { font:500 clamp(11px,1vw,15px)/1 ui-monospace,"SF Mono",monospace;
+             letter-spacing:.42em; color:var(--dim); text-transform:uppercase; }
+
+  .word { font:800 clamp(52px,9vw,168px)/.86 "PingFang SC",-apple-system,sans-serif;
+          letter-spacing:-.02em; color:var(--amber); }
+
+  /* 每个字单独错峰落下，比整块淡入有分量 */
+  .word span { display:inline-block; transform:translateY(.5em); opacity:0; }
+  @keyframes drop { to { transform:none; opacity:1; } }
+
+  .note { position:fixed; bottom:0; left:0; right:0; height:26vh;
+          display:flex; align-items:center; justify-content:flex-end;
+          padding-right:7vw;
+          font:400 clamp(13px,1.3vw,20px)/1 "PingFang SC",-apple-system,sans-serif;
+          letter-spacing:.28em; color:var(--dim); opacity:0; }
+
+  /* 页面是被壳提前加载好的，动画一律挂在 .gong-live 下面，
+     等壳喊 reveal 才起跑。按 load 起算会跑偏几十秒。 */
+  html.gong-live .shutter { animation:slam .5s cubic-bezier(.2,.9,.2,1) forwards,
+                                      lift .6s cubic-bezier(.6,0,.8,1) 4.6s forwards; }
+  html.gong-live .hair    { animation:flash .4s ease-out .42s forwards,
+                                      fade  .4s ease-in  4.6s forwards; }
+  html.gong-live .word span { animation:drop .5s cubic-bezier(.16,1,.3,1) forwards; }
+  html.gong-live .note    { animation:flash .6s ease-out 1s forwards,
+                                      fade  .4s ease-in  4.6s forwards; }
+
+  @media (prefers-reduced-motion:reduce) { * { animation-duration:.01ms !important; } }
+</style>
+</head>
+<body>
+  <div class="shutter top"></div>
+  <div class="shutter bottom"></div>
+  <div class="hair a"></div><div class="hair b"></div>
+
+  <div class="stack">
+    <div class="eyebrow">shift complete</div>
+    <div class="word" id="w">收工</div>
+  </div>
+  <div class="note">合上电脑 · 剩下的明天再说</div>
+
+<script>
+  // 文案写死在主题里。壳不传内容参数——要换话术就换主题，
+  // 不要指望用一个 --message 把同一套动画复用成十种提醒。
+  const w = document.getElementById('w');
+
+  // 逐字错峰。delay 写在 style 上，动画本体由 .gong-live 触发。
+  w.innerHTML = [...w.textContent]
+    .map((c, i) => `<span style="animation-delay:${.5 + i * .09}s">${c}</span>`).join('');
+
+  // 动画全靠 CSS，JS 只负责在动画放完后喊一声退出。
+  // 用壳的心跳而不是 setTimeout —— 页面里的定时器在重绘压力下会被拖到几秒甚至不来。
+  let t0 = 0;
+  window.gong.onReveal = () => { t0 = window.gong.now || Date.now(); };
+  window.gong.onTick = (now) => {
+    // 主题契约：动画结束必须喊这一声，壳才会退出。没喊到的话壳有兜底超时。
+    if (t0 && now - t0 >= 5400) window.gong.done();
+  };
+</script>
+</body>
+</html>
