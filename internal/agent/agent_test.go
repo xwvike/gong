@@ -46,8 +46,10 @@ func TestComputeTrigger(t *testing.T) {
 	}
 }
 
-func sched(name, at string, days []int) config.Schedule {
-	return config.Schedule{Name: name, At: at, Weekdays: days,
+// sched 造一条测试用定时。label 留空是常态——身份不再靠名字，
+// 靠它在 c.Schedules 里的位置，所以断言时按 Theme 或位置区分，不按名字。
+func sched(label, at string, days []int) config.Schedule {
+	return config.Schedule{Label: label, At: at, Weekdays: days,
 		Theme: "default", Enabled: true, Grace: config.DefaultGrace}
 }
 
@@ -82,8 +84,8 @@ func TestMatch(t *testing.T) {
 			if got == nil {
 				t.Fatal("没匹配到任何定时")
 			}
-			if got.Name != tc.want {
-				t.Errorf("匹配到 %s，想要 %s", got.Name, tc.want)
+			if got.Label != tc.want {
+				t.Errorf("匹配到 %s，想要 %s", got.Label, tc.want)
 			}
 		})
 	}
@@ -96,7 +98,7 @@ func TestMatchSkipsDisabled(t *testing.T) {
 	}}
 	c.Schedules[0].Enabled = false
 	got := Match(c, mon(12, 0, 0))
-	if got == nil || got.Name != "evening" {
+	if got == nil || got.Label != "evening" {
 		t.Fatalf("停用的定时不该被匹配到，拿到 %v", got)
 	}
 }
@@ -117,7 +119,7 @@ func TestMatchAcrossMidnight(t *testing.T) {
 	// 触发点在周日，反查结果仍必须指向周一的目标日期。
 	now := time.Date(2026, 7, 26, 23, 59, 0, 0, time.Local)
 	got := MatchTarget(c, now)
-	if got == nil || got.Schedule.Name != "mid" {
+	if got == nil || got.Schedule.Label != "mid" {
 		t.Fatalf("跨午夜的定时没匹配上，拿到 %v", got)
 	}
 	want := time.Date(2026, 7, 27, 0, 0, 2, 0, time.Local)
@@ -245,7 +247,7 @@ func TestWritePlistReplacesFileWithoutLeavingTemp(t *testing.T) {
 func TestSyncRejectsInvalidConfigBeforeWriting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	c := &config.Config{Schedules: []config.Schedule{{
-		Name: "bad", At: "25:00", Weekdays: []int{1}, Theme: "default", Enabled: true,
+		At: "25:00", Weekdays: []int{1}, Theme: "default", Enabled: true,
 	}}}
 	res := Sync(c, "/tmp/gong")
 	if len(res.Errors) != 1 {

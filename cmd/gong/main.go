@@ -73,8 +73,8 @@ func usage() {
 
   gong on            写默认配置并接管 launchd（装完跑这一条就能用）
   gong set           TUI：增删改查定时、选主题、预览
-  gong ls            列出定时和它们的实际状态
-  gong rm <name>     删掉一条定时
+  gong ls            列出定时和它们的实际状态（前面的编号就是 rm 用的那个）
+  gong rm <序号>     删掉一条定时，序号看 gong ls（会先问一遍，加 -y 跳过确认）
   gong vis <theme>   预览一个主题
   gong stop          掐掉正在播的浮层
   gong themes        列出可用主题
@@ -84,7 +84,8 @@ func usage() {
       --purge        连 ~/.config/gong 一起删（含你自己写的主题）
       -y             不用确认
 
-默认两条定时：noon 12:00、evening 18:00，周一到周五。
+默认两条：#1 12:00（午间）、#2 18:00（下班），周一到周五。
+定时不需要起名字——标签是可选的，纯装饰，留空就用编号。
 `)
 }
 
@@ -137,11 +138,11 @@ func install(c *config.Config) error {
 	for _, n := range res.Cleaned {
 		fmt.Println("已清掉旧版遗留的 plist:", n)
 	}
-	for _, n := range res.Active {
-		s, _ := c.Find(n)
-		tr := agent.TriggerFor(*s)
-		fmt.Printf("%-10s %s %s  主题 %-8s (launchd 在 %02d:%02d 叫醒)\n",
-			n, s.At, s.WeekdaysLabel(), s.Theme, tr.Hour, tr.Minute)
+	for _, a := range res.Active {
+		s := a.Schedule
+		tr := agent.TriggerFor(s)
+		fmt.Printf("%-6s %s %s  主题 %-8s (launchd 在 %02d:%02d 叫醒)\n",
+			s.DisplayName(a.Index), s.At, s.WeekdaysLabel(), s.Theme, tr.Hour, tr.Minute)
 	}
 	for _, e := range res.Errors {
 		fmt.Fprintln(os.Stderr, "  !", e)
@@ -343,8 +344,8 @@ func cmdLs() error {
 		fmt.Println("一条定时都没有。")
 		return nil
 	}
-	fmt.Printf("%-12s %-9s %-8s %-10s %-8s %s\n", "名字", "时间", "星期", "主题", "状态", "launchd 叫醒")
-	for _, s := range c.Schedules {
+	fmt.Printf("%-4s %-8s %-9s %-8s %-10s %-8s %s\n", "序号", "标签", "时间", "星期", "主题", "状态", "launchd 叫醒")
+	for i, s := range c.Schedules {
 		state := "停用"
 		if s.Enabled {
 			state = "启用"
@@ -358,8 +359,12 @@ func cmdLs() error {
 		if _, err := theme.Resolve(s.Theme); err != nil {
 			note = "  ← 主题找不到"
 		}
-		fmt.Printf("%-12s %-9s %-8s %-10s %-8s %s%s\n",
-			s.Name, s.At, s.WeekdaysLabel(), s.Theme, state, wake, note)
+		label := s.Label
+		if label == "" {
+			label = "—"
+		}
+		fmt.Printf("#%-3d %-8s %-9s %-8s %-10s %-8s %s%s\n",
+			i+1, label, s.At, s.WeekdaysLabel(), s.Theme, state, wake, note)
 	}
 
 	// 所有定时共用一个 launchd job，所以接管状态是全局的一个。
@@ -372,22 +377,50 @@ func cmdLs() error {
 	return nil
 }
 
+// cmdRm 照 ufw 的路子：身份是序号，序号会因为增删而变——参考 ufw delete <n>
+// 一样没有 ID，靠的是删除前把「即将删除的是哪条」打出来再确认，而不是假装
+// 序号绝对稳定。序号读错了、或者跟 gong ls 那次相比配置已经变了，这一步能兜住。
 func cmdRm(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("要删哪条？gong rm <name>")
+	yes := false
+	var numArg string
+	for _, a := range args {
+		switch a {
+		case "-y", "--yes":
+			yes = true
+		default:
+			numArg = a
+		}
 	}
-	name := args[0]
+	if numArg == "" {
+		return fmt.Errorf("要删哪条？gong rm <序号>（序号看 gong ls）")
+	}
+	n, err := strconv.Atoi(numArg)
+	if err != nil {
+		return fmt.Errorf("序号得是个数字，收到 %q", numArg)
+	}
 	c, err := config.LoadOrDefault()
 	if err != nil {
 		return err
 	}
-	if !c.Remove(name) {
-		return fmt.Errorf("没有叫 %q 的定时", name)
+	s, ok := c.At(n - 1)
+	if !ok {
+		return fmt.Errorf("没有第 %d 条定时（跑 gong ls 看看现在有几条）", n)
+	}
+
+	fmt.Printf("即将删除：#%d %s %s %s  主题 %s\n", n, s.DisplayName(n-1), s.At, s.WeekdaysLabel(), s.Theme)
+	if !yes && !confirm("确定吗？[y/N] ") {
+		fmt.Println("取消了，什么都没动。")
+		return nil
+	}
+
+	display := s.DisplayName(n - 1)
+	if !c.RemoveAt(n - 1) {
+		return fmt.Errorf("没有第 %d 条定时", n)
 	}
 	if err := c.Save(); err != nil {
 		return err
 	}
-	fmt.Println("已删除", name)
+	fmt.Println("已删除", display)
 	// 定时是共用一个 plist 的，删一条要重新生成整份
 	return install(c)
 }
@@ -451,36 +484,27 @@ func cmdStop() error {
 // 这里将来要挂「收摊」动作（暂停音乐、shortcuts run 切专注、退 Xcode），
 // 所以让 launchd 调 gong 而不是直接调 gong-overlay。
 // 最后用 syscall.Exec 把自己换成壳，不留多余进程。
-func cmdFire(args []string) error {
+// 任何位置参数一律忽略——0.1.0 遗留的 per-name plist 会传一个名字，
+// 但 Name 这个概念已经不存在了。忽略掉、总是按时间反查，效果是等价的：
+// 反查本来就能推出同一个绝对目标时刻，旧 plist 会在下次 gong on 时被清掉。
+func cmdFire(_ []string) error {
 	c, err := config.Load()
 	if err != nil {
 		return err
 	}
 
-	now := time.Now()
-	var s *config.Schedule
-	var target time.Time
-	if len(args) > 0 {
-		// 带名字的调法只为兼容 0.1.0 遗留的 per-name plist，
-		// 那些 plist 会在下次 gong on 时被清掉。
-		if s, _ = c.Find(args[0]); s == nil {
-			return fmt.Errorf("配置里没有定时 %q", args[0])
-		}
-		target = agent.TargetFor(*s, now)
-	} else {
-		// 所有定时共用一个 job，launchd 不会告诉我们是谁触发的，按时间反查。
-		// 猜错也不至于出事：壳自己的时间窗判断会把不该放的挡掉。
-		match := agent.MatchTarget(c, now)
-		if match == nil {
-			return nil // 一条启用的都没有，安静退出
-		}
-		s, target = match.Schedule, match.Target
+	// 所有定时共用一个 job，launchd 不会告诉我们是谁触发的，按时间反查。
+	// 猜错也不至于出事：壳自己的时间窗判断会把不该放的挡掉。
+	match := agent.MatchTarget(c, time.Now())
+	if match == nil {
+		return nil // 一条启用的都没有，安静退出
 	}
+	s, target := match.Schedule, match.Target
 	if !s.Enabled {
 		return nil // 停用了就安静退出，不该是错误
 	}
 	if target.IsZero() {
-		return fmt.Errorf("无法计算定时 %q 的目标时刻", s.Name)
+		return fmt.Errorf("无法计算定时 %s 的目标时刻", s.DisplayName(match.Index))
 	}
 	th, err := theme.Resolve(s.Theme)
 	if err != nil {
@@ -493,20 +517,22 @@ func cmdFire(args []string) error {
 
 	// TODO 收摊动作在这里跑，跑完再 exec 到壳
 
-	argv := overlayArgs(overlay, *s, th, target)
+	// --name 只用来给壳的 stderr 打标，不是身份——用序号就够，
+	// 不必依赖一个现在已经不强制存在的标签。
+	argv := overlayArgs(overlay, *s, th, target, fmt.Sprintf("#%d", match.Index+1))
 	return syscall.Exec(overlay, argv, os.Environ())
 }
 
 // overlayArgs 将一次定时完整地交给壳。--at 保留给旧版壳和人工调用，
 // --target 才是本次触发对应的绝对目标时刻，避免跨午夜时按「今天」解析。
-func overlayArgs(overlay string, s config.Schedule, th theme.Theme, target time.Time) []string {
+func overlayArgs(overlay string, s config.Schedule, th theme.Theme, target time.Time, tag string) []string {
 	return []string{overlay,
 		"--at", config.FormatClock(s.Seconds()),
 		"--target", strconv.FormatInt(target.Unix(), 10),
 		"--lead", strconv.Itoa(th.LeadSeconds()),
 		"--grace", strconv.Itoa(s.Grace),
 		"--timeout", strconv.Itoa(th.TimeoutSeconds()),
-		"--name", s.Name,
+		"--name", tag,
 		"--theme", th.HTML,
 	}
 }

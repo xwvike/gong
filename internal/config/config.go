@@ -21,7 +21,10 @@ type Config struct {
 }
 
 type Schedule struct {
-	Name     string `toml:"name"`
+	// Label 纯粹给人看，完全可选，留空就留空。不参与任何匹配、不拼进
+	// launchd label 或文件名，所以也没有字符限制——那些顾虑都是「名字曾经
+	// 是标识符」那版设计留下的，现在标识符是它在列表里的位置（序号）。
+	Label    string `toml:"label"`
 	At       string `toml:"at"`       // "HH:MM" 或 "HH:MM:SS"
 	Weekdays []int  `toml:"weekdays"` // launchd 口径：0/7=周日，1=周一 … 6=周六
 	Theme    string `toml:"theme"`
@@ -32,13 +35,14 @@ type Schedule struct {
 const DefaultGrace = 1200
 
 // Default 是 gong on 在没有配置时写下的东西。
+// 两条都给了标签只是做个示范——标签不是必须的，序号本身就够用。
 func Default() *Config {
 	return &Config{
 		Version: 1,
 		Schedules: []Schedule{
-			{Name: "noon", At: "12:00:00", Weekdays: []int{1, 2, 3, 4, 5},
+			{Label: "午间", At: "12:00:00", Weekdays: []int{1, 2, 3, 4, 5},
 				Theme: "nixie", Enabled: true, Grace: DefaultGrace},
-			{Name: "evening", At: "18:00:00", Weekdays: []int{1, 2, 3, 4, 5},
+			{Label: "下班", At: "18:00:00", Weekdays: []int{1, 2, 3, 4, 5},
 				Theme: "default", Enabled: true, Grace: DefaultGrace},
 		},
 	}
@@ -101,35 +105,30 @@ func (c *Config) Save() error {
 	return os.Rename(tmp, paths.ConfigFile())
 }
 
-func (c *Config) Find(name string) (*Schedule, int) {
-	for i := range c.Schedules {
-		if c.Schedules[i].Name == name {
-			return &c.Schedules[i], i
-		}
+// At 按位置取一条定时（0-based）。定时的身份就是它在列表里的位置，
+// 命令行和 TUI 里显示的「#N」都是 N = i+1。
+func (c *Config) At(i int) (*Schedule, bool) {
+	if i < 0 || i >= len(c.Schedules) {
+		return nil, false
 	}
-	return nil, -1
+	return &c.Schedules[i], true
 }
 
-func (c *Config) Remove(name string) bool {
-	_, i := c.Find(name)
-	if i < 0 {
+// RemoveAt 按位置删一条，i 是 0-based 下标。
+func (c *Config) RemoveAt(i int) bool {
+	if i < 0 || i >= len(c.Schedules) {
 		return false
 	}
 	c.Schedules = append(c.Schedules[:i], c.Schedules[i+1:]...)
 	return true
 }
 
-// UniqueName 给新建的定时找一个没被占用的名字。
-func (c *Config) UniqueName(base string) string {
-	if _, i := c.Find(base); i < 0 {
-		return base
+// DisplayName 是消息里指代一条定时的统一写法：有标签用标签，没有就用序号。
+func (s Schedule) DisplayName(index int) string {
+	if s.Label != "" {
+		return s.Label
 	}
-	for n := 2; ; n++ {
-		cand := base + strconv.Itoa(n)
-		if _, i := c.Find(cand); i < 0 {
-			return cand
-		}
-	}
+	return fmt.Sprintf("#%d", index+1)
 }
 
 // ---- 时间 ----
@@ -197,41 +196,35 @@ func (s Schedule) WeekdaysLabel() string {
 }
 
 // Validate 在保存前挡住会生成坏 plist 的配置。
+//
+// 注意这里不再检查「名字」——标签是可选的自由文本，没有唯一性要求，
+// 也没有字符限制，因为它不再拼进 launchd label 或文件名。出错信息里
+// 用 DisplayName(i) 指代第 i 条，标签留空时自动落回 "#序号"。
 func (c *Config) Validate() error {
 	if c == nil {
 		return fmt.Errorf("配置不能为空")
 	}
-	seen := map[string]bool{}
-	for _, s := range c.Schedules {
-		if s.Name == "" {
-			return fmt.Errorf("有一条定时没有名字")
-		}
-		if strings.ContainsAny(s.Name, " /.\\\t") {
-			return fmt.Errorf("定时名 %q 不能含空格、点、斜杠——它要拼进 launchd label 和文件名", s.Name)
-		}
-		if seen[s.Name] {
-			return fmt.Errorf("定时名重复：%s", s.Name)
-		}
-		seen[s.Name] = true
+	for i, s := range c.Schedules {
+		name := s.DisplayName(i)
 		if _, err := ParseClock(s.At); err != nil {
-			return fmt.Errorf("定时 %s：%w", s.Name, err)
+			return fmt.Errorf("定时 %s：%w", name, err)
 		}
 		if len(s.Weekdays) == 0 {
-			return fmt.Errorf("定时 %s 一个星期几都没选", s.Name)
+			return fmt.Errorf("定时 %s 一个星期几都没选", name)
 		}
 		for _, d := range s.Weekdays {
 			if d < 0 || d > 7 {
-				return fmt.Errorf("定时 %s：星期几必须是 0 到 7，收到 %d", s.Name, d)
+				return fmt.Errorf("定时 %s：星期几必须是 0 到 7，收到 %d", name, d)
 			}
 		}
 		if s.Theme == "" {
-			return fmt.Errorf("定时 %s 没有主题", s.Name)
+			return fmt.Errorf("定时 %s 没有主题", name)
 		}
 		if s.Theme == "." || s.Theme == ".." || strings.ContainsAny(s.Theme, `/\\`) {
-			return fmt.Errorf("定时 %s：主题名不能含路径分隔符", s.Name)
+			return fmt.Errorf("定时 %s：主题名不能含路径分隔符", name)
 		}
 		if s.Grace < 0 {
-			return fmt.Errorf("定时 %s：grace 不能是负数", s.Name)
+			return fmt.Errorf("定时 %s：grace 不能是负数", name)
 		}
 	}
 	return nil

@@ -12,7 +12,7 @@ import (
 
 func validSchedule() Schedule {
 	return Schedule{
-		Name:     "lunch",
+		Label:    "lunch",
 		At:       "12:34:56",
 		Weekdays: []int{1, 3, 5},
 		Theme:    "default",
@@ -81,11 +81,12 @@ func TestValidate(t *testing.T) {
 	}{
 		{name: "valid", mutate: func(*Config) {}},
 		{name: "nil config", mutate: nil, wantError: "配置不能为空"},
-		{name: "empty name", mutate: func(c *Config) { c.Schedules[0].Name = "" }, wantError: "没有名字"},
-		{name: "unsafe name", mutate: func(c *Config) { c.Schedules[0].Name = "lunch/foo" }, wantError: "不能含空格"},
-		{name: "duplicate name", mutate: func(c *Config) {
+		// 标签现在纯装饰：留空、带空格、跟别的定时重复都合法，不该拦。
+		{name: "empty label is fine", mutate: func(c *Config) { c.Schedules[0].Label = "" }},
+		{name: "label with spaces is fine", mutate: func(c *Config) { c.Schedules[0].Label = "my lunch" }},
+		{name: "duplicate label is fine", mutate: func(c *Config) {
 			c.Schedules = append(c.Schedules, c.Schedules[0])
-		}, wantError: "定时名重复"},
+		}},
 		{name: "bad time", mutate: func(c *Config) { c.Schedules[0].At = "25:00" }, wantError: "时间越界"},
 		{name: "no weekdays", mutate: func(c *Config) { c.Schedules[0].Weekdays = nil }, wantError: "一个星期几都没选"},
 		{name: "weekday below range", mutate: func(c *Config) { c.Schedules[0].Weekdays = []int{-1} }, wantError: "星期几必须是 0 到 7"},
@@ -121,6 +122,24 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// 出错信息里指代第几条定时：有标签用标签，没有就落回 "#序号"——
+// 不能假设每条定时都有标签（现在压根不要求）。
+func TestValidateErrorUsesDisplayName(t *testing.T) {
+	c := &Config{Version: 1, Schedules: []Schedule{
+		{Label: "午间", At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: -1},
+	}}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "午间") {
+		t.Fatalf("有标签时应该报标签，got %v", err)
+	}
+
+	c.Schedules[0].Label = ""
+	err = c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "#1") {
+		t.Fatalf("没标签时应该落回 #1，got %v", err)
+	}
+}
+
 func TestSaveAndLoadRoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	want := &Config{Version: 1, Schedules: []Schedule{validSchedule()}}
@@ -140,6 +159,39 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 }
 
+// 0.1.x 的配置文件里有 name 字段，没有 label。TOML 解码器会安静地
+// 忽略未知字段，Label 落回空字符串——不该报错，也不该崩，纯粹降级成
+// 一条没有标签的定时（DisplayName 会现算出 "#1"）。
+func TestLoadIgnoresLegacyNameField(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyTOML := `version = 1
+
+[[schedule]]
+name = "noon"
+at = "12:00:00"
+weekdays = [1, 2, 3, 4, 5]
+theme = "nixie"
+enabled = true
+grace = 1200
+`
+	if err := os.WriteFile(paths.ConfigFile(), []byte(legacyTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load() 应该能读旧版配置，error = %v", err)
+	}
+	if got := c.Schedules[0].Label; got != "" {
+		t.Errorf("旧版 name 字段不该被误读成 Label，got %q", got)
+	}
+	if got := c.Schedules[0].DisplayName(0); got != "#1" {
+		t.Errorf("没标签时 DisplayName = %q，想要 #1", got)
+	}
+}
+
 func TestLoadDefaultsZeroGraceAndRejectsInvalidValues(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
@@ -148,7 +200,7 @@ func TestLoadDefaultsZeroGraceAndRejectsInvalidValues(t *testing.T) {
 	validTOML := `version = 1
 
 [[schedule]]
-name = "morning"
+label = "morning"
 at = "08:00"
 weekdays = [1, 2, 3, 4, 5]
 theme = "default"
@@ -178,12 +230,51 @@ grace = 0
 func TestSaveRejectsInvalidConfigBeforeWriting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := (&Config{Version: 1, Schedules: []Schedule{{
-		Name: "broken", At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: -1,
+		At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: -1,
 	}}}).Save(); err == nil {
 		t.Fatal("Save() should reject negative grace")
 	}
 	if Exists() {
 		t.Fatal("Save() wrote a file after validation failed")
+	}
+}
+
+func TestAtAndRemoveAtAreIndexBased(t *testing.T) {
+	c := &Config{Schedules: []Schedule{
+		{Label: "a", At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: DefaultGrace},
+		{Label: "b", At: "18:00", Weekdays: []int{1}, Theme: "default", Grace: DefaultGrace},
+	}}
+
+	if _, ok := c.At(-1); ok {
+		t.Error("At(-1) 应该越界失败")
+	}
+	if _, ok := c.At(2); ok {
+		t.Error("At(2) 应该越界失败（只有 2 条，下标 0..1）")
+	}
+	s, ok := c.At(1)
+	if !ok || s.Label != "b" {
+		t.Fatalf("At(1) = %v, %v，想要 b", s, ok)
+	}
+
+	if c.RemoveAt(5) {
+		t.Error("越界的 RemoveAt 应该返回 false")
+	}
+	if !c.RemoveAt(0) {
+		t.Fatal("RemoveAt(0) 应该成功")
+	}
+	if len(c.Schedules) != 1 || c.Schedules[0].Label != "b" {
+		t.Fatalf("删除后应该只剩 b，got %v", c.Schedules)
+	}
+}
+
+func TestDisplayNameFallsBackToIndex(t *testing.T) {
+	s := Schedule{}
+	if got := s.DisplayName(0); got != "#1" {
+		t.Errorf("DisplayName(0) 空标签 = %q，想要 #1", got)
+	}
+	s.Label = "午间"
+	if got := s.DisplayName(0); got != "午间" {
+		t.Errorf("DisplayName(0) 有标签 = %q，想要 午间", got)
 	}
 }
 

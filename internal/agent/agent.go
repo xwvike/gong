@@ -130,6 +130,7 @@ func nearestTrigger(t Trigger, now time.Time) (time.Time, bool) {
 // 壳使用；否则跨午夜时壳会把目标错误解析到触发日。
 type MatchResult struct {
 	Schedule *config.Schedule
+	Index    int // 在 c.Schedules 里的位置，打日志标签时当「#N」用，不依赖名字
 	Target   time.Time
 }
 
@@ -158,12 +159,12 @@ func MatchTarget(c *config.Config, now time.Time) *MatchResult {
 	}
 	return &MatchResult{
 		Schedule: &c.Schedules[best],
+		Index:    best,
 		Target:   targetForTrigger(c.Schedules[best], bestTrigger),
 	}
 }
 
-// TargetFor 返回一条定时离 now 最近的目标时刻。带名字的旧版 plist 没有
-// 触发点参数，cmdFire 用这个函数补出同样的绝对日期。
+// TargetFor 返回一条定时离 now 最近的目标时刻，供 cmdFire 补出绝对日期。
 func TargetFor(s config.Schedule, now time.Time) time.Time {
 	trigger, ok := nearestTrigger(TriggerFor(s), now)
 	if !ok {
@@ -306,10 +307,18 @@ func Kickstart() error {
 
 // ---- 同步 ----
 
+// ActiveSchedule 是一条被装进 plist 的定时，连它在 c.Schedules 里的
+// 真实位置一起带出来——Active 只收启用且主题有效的子集，下标从 0 重新数，
+// 跟原始位置对不上，所以不能只传 config.Schedule，DisplayName(i) 会算错。
+type ActiveSchedule struct {
+	Index    int
+	Schedule config.Schedule
+}
+
 type SyncResult struct {
-	Active  []string // 这次写进 plist 的定时
-	Cleaned []string // 清掉的老式 per-name plist
-	Removed bool     // 一条启用的都没有，plist 被整个撤了
+	Active  []ActiveSchedule // 这次写进 plist 的定时，用于打印摘要
+	Cleaned []string         // 清掉的老式 per-name plist
+	Removed bool             // 一条启用的都没有，plist 被整个撤了
 	Errors  []error
 }
 
@@ -340,15 +349,15 @@ func Sync(c *config.Config, gongPath string) SyncResult {
 	}
 
 	var valid []config.Schedule
-	for _, s := range c.Schedules {
+	for i, s := range c.Schedules {
 		if !s.Enabled {
 			continue
 		}
 		if _, err := theme.Resolve(s.Theme); err != nil {
-			res.Errors = append(res.Errors, fmt.Errorf("定时 %s：%w", s.Name, err))
+			res.Errors = append(res.Errors, fmt.Errorf("定时 %s：%w", s.DisplayName(i), err))
 			continue
 		}
-		res.Active = append(res.Active, s.Name)
+		res.Active = append(res.Active, ActiveSchedule{Index: i, Schedule: s})
 		valid = append(valid, s)
 	}
 

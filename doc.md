@@ -177,8 +177,8 @@ gong on                   # 写默认配置 + 生成 plist + bootstrap
 gong off                  # bootout + 删 plist（卸载前跑）
 gong set                  # TUI：定时列表 + 主题选择
 gong vis <theme>          # 预览
-gong ls                   # 列出已注册定时
-gong rm <name>            # 删除某条定时
+gong ls                   # 列出已注册定时，最左一列的序号就是 rm 用的那个
+gong rm <序号>            # 删除某条定时（序号看 gong ls，不是名字）
 gong stop                 # 掐掉正在播的浮层（pkill -x gong-overlay）
 gong uninstall            # 一条龙卸干净，最后自动 exec 到 brew uninstall
 ```
@@ -196,7 +196,27 @@ gong uninstall            # 一条龙卸干净，最后自动 exec 到 brew unin
 判断是不是 brew 装的，看**可执行文件在不在 `brew --prefix` 底下**，别去问 `brew list`
 ——源码编译的和 brew 装的可能同时存在，问 `brew list` 会把源码跑的那个也误判成 brew 装的。
 
-默认两条定时：`noon` 12:00、`evening` 18:00，周一到周五。
+默认两条定时：#1 12:00（标签「午间」）、#2 18:00（标签「下班」），周一到周五。
+
+### 定时不需要名字，身份是它的位置
+
+**这条推翻了早先的写法**（早先 `Schedule.Name` 是必填、唯一、限字符的标识符，`gong rm <name>` 靠它定位）。
+
+现在 `Schedule` 只有一个可选的 `Label`——纯装饰，留空、跟别的定时重复、带空格，一律合法。真正的身份是它在 `c.Schedules` 里的**位置**：`gong ls`/TUI 表格里的 `#1`/`#2` 就是这个位置的 1-based 显示，`gong rm <序号>` 也按这个来。
+
+推翻的理由很直接：起名字是一道没必要的门槛。用户要的往往是「中午一条、下班一条」，不是给每条定时想一个还要保证不重复、不能带空格的标识符。序号天然满足身份的两个要求——**存在、可辨认**——不需要用户多做任何事。真想要「午间」「下班」这种可读的标签，加一个纯展示、没有任何约束的字段就够了。
+
+**已经确认过 Name/Label 从来不是系统集成层面的标识符**（这是能放心做这次改动的前提）：`paths.Label`（launchd job 名）在 v0.1.1 合并单 plist 时就已经是全局常量 `local.gong`，跟某条定时的名字毫无关系；`LegacyLabel(name)` 只在扫描磁盘上 0.1.0 遗留的 `local.gong.<name>.plist` 文件名时才用得到那个 `name`，而那是从**文件名**解析出来的字符串，不是从 `config.Schedule.Name` 读出来的——所以去掉 `Name` 字段，一行迁移逻辑都不用碰。
+
+具体改动：
+
+- `config.Schedule.Label string`，无校验；`Validate()` 不再检查名字非空/唯一/字符集
+- `Schedule.DisplayName(i int) string`——有标签用标签，没有就是 `"#" + (i+1)`，所有面向用户的消息（删除确认、主题解析失败告警、`gong on` 装完的摘要）统一走这个
+- `config.Config.At(i)` / `RemoveAt(i)` 按位置存取，取代原来按名字查找的 `Find`/`Remove`
+- `gong fire` 那条「带名字调用只为兼容 0.1.0」的分支整个删掉了：Name 已经不存在，任何位置参数一律忽略、永远按时间反查——旧 plist 传进来的参数变成噪音，反查本来就能算出同一个绝对目标时刻，效果等价
+- `agent.SyncResult.Active` 从 `[]string`（名字）改成 `[]agent.ActiveSchedule{Index, Schedule}`——它是 `Sync()` 内部过滤（只留启用且主题有效的）之后的子集，下标从 0 重新数，跟原始位置对不上，所以必须把原始 `Index` 一起带出来，不能只传 `config.Schedule` 指望调用方自己算——这个坑在写 `install()` 的打印逻辑时就地撞上了，修完才定型成现在这样
+
+**旧配置文件怎么办**：0.1.x 写的 `config.toml` 里有 `name = "noon"` 这一行，没有 `label`。TOML 解码器会安静地忽略未识别的 `name` 字段，`Label` 落回空字符串——不报错、不崩，只是那条定时从此显示成 `#1` 而不是 `noon`，功能一点没丢。`gong set` 里随手按 `r` 就能把 "noon" 重新填回 Label（或者干脆不填，让编号说话）。
 
 ## 七、架构要点
 
@@ -248,6 +268,30 @@ internal/tui           gong set
 ```
 
 `agent.Sync` 是幂等的：enabled 的装上，disabled 和配置里已删除的卸掉。所以 `gong on` 可以随便重复跑。
+
+### TUI 组件化重写（`gong set`）
+
+第一版 `gong set` 是手写 `fmt.Sprintf` 拼字符串、手写输入缓冲、手写按键提示——能用，但谈不上"像样"。改用 `bubbles` 的现成组件后分工是：
+
+| 组件 | 用在哪 | 为什么 |
+|---|---|---|
+| `table` | 定时列表 | 列对齐、光标、滚动不用自己算；而且它按 `runewidth` 算宽度，中文字符正确按双宽处理——原来手写的 `%-12s` 是按 rune 数对齐，中文名字/星期会错位 |
+| `list` | 主题库（新 tab） | 自带 `/` 模糊搜索、分页、状态栏；主题多了之后靠名字翻已经不够用 |
+| `textinput` | 改名 | 校验和光标交给它，`Validate` 钩子做实时提示 |
+| `help` + `key.Binding` | 底部按键提示 | 按 `?` 能展开全帮助，不用手写两份文案 |
+
+新增一个 tab 切换：`定时` / `主题库`。编辑一条定时时按 `t` 能跳进主题库整个逛（带描述、带搜索），选中回车就带着选择回到编辑态，不用再靠左右键盲猜主题名循环。
+
+顺带把 `Grace`（宽限）字段第一次暴露到 TUI 里——原来这个字段只能手改 `config.toml`，编辑面板里根本没有对应的字段。
+
+**两个组件都有别处不会写文档告诉你的坑**：
+
+1. **`table` 的 `renderRow` 用 `runewidth.Truncate` 截断单元格，这个函数不认 ANSI 转义。** 谁敢往一个单元格字符串里塞 `lipgloss` 的颜色，截断逻辑会把转义序列当成普通字符去数宽度、去切，输出直接花掉。所以表格单元格只能是纯文本，颜色只能加在 `Header`/`Selected` 这种整行样式上。主题解析失败的定时，没有在单元格里标红或加 `!` 后缀，而是走 `View()` 里单独一行的告警——`list` 那边不受这个限制，它的 `DefaultDelegate.Render` 用的是 ANSI-safe 的 `ansi.Truncate`，所以主题库的描述文字可以放心嵌颜色。
+2. **`table.SetHeight(h)` 内部会先减掉表头那一行才是真正的可见数据行数**（`viewport.Height = h - lipgloss.Height(headersView())`），传行数本身会少显示最后一行——两条定时只显示了一条，排查了好一阵才在源码里翻到这行减法。`list.SetSize` 同样有这个类型的坑：它的内容区是 `lipgloss.NewStyle().Height(availHeight).Render(...)` 硬性撑开的，条目不够多就会拿空行填满剩下的高度，不会像 flex 布局那样自动收缩。两处都改成了按实际行数/条目数动态算高度（封顶在终端可用空间内），不再无脑塞满整个屏幕。
+
+**这些坑不是读代码看出来的，是把渲染结果肉眼过了一遍才发现的**——`go build`/`go vet`/单测全绿的时候，界面上一大截空白和 `12: 00 :00` 这种错位一个都不会报错。做法是绕开 `teatest`（它只暴露持续的字节流，不是"当前屏幕"快照，硬要拿它当截图工具会很别扭），直接对 `Model` 连续调用 `Update`/`View`（纯函数，不需要真终端），在每一步之间把 ANSI 转义剥掉打印出来，肉眼扫一遍。改完效果、验完就删，不留在正式测试里——它不断言任何东西，留着只会腐烂。
+
+行为覆盖走的是 `charmbracelet/x/exp/teatest`：起一个真正的 `tea.Program`，用 `tm.Send(tea.KeyMsg{...})` 模拟按键，`tm.FinalModel(t)` 拿到退出时的模型状态断言字段。这条路能测「按两次 q 才退出」「保存校验失败不退出」这种真实涉及 `tea.Quit` 时序的行为，光靠直接调 `Update` 测不出来（因为 `tea.Quit` 只是个 cmd，得有真正的 `Program` 在跑才会真的终止）。
 
 ### 职责划分（重要）
 
@@ -555,3 +599,4 @@ swiftc -O overlay.swift -o gong-overlay
   顺带：`xwvike/tap` 这种通用 tap 名也比一个软件一个 tap 好——多个软件共用一个 tap 是 Homebrew 的常规做法。
 - **假 HOME 隔离不了 launchd。** 测试时用 `HOME=/tmp/xxx` 跑 `gong on/off/uninstall`，文件路径确实被隔离了，但 `launchctl bootout gui/$UID/local.gong` 用的是**全局 label**，跟 HOME 无关——所以假 HOME 里的一次 uninstall 会把真实系统上那个同名 job 一起卸掉，而 plist 文件还留在真 HOME 里，表现是「文件在、`gong ls` 说未接管」。
   写这段时就这么把自己的 job 卸了一次。以后跑这类测试，**结束后一定要 `gong on` 复位并用 `launchctl list | grep gong` 确认**，或者给测试用的 label 加前缀。
+  **这条踩过第二次**——测 `gong rm` 的确认流程时，同样的假 HOME 手法又把真实 `local.gong` job 卸掉了一次。恢复时又多摔了一跤：随手拿本地开发编译的 `gong` 跑了一次 `gong on` 复位，结果 plist 里的 `ProgramArguments` 被重写成项目目录里那个开发中的二进制路径，而不是 `/opt/homebrew/bin/gong`——复位之后**必须用 `which gong` 确认走的是稳定路径**，而不是手边随便一个能跑的 `gong`。教训已经写进跨会话记忆里了，靠事后检查兜底，别指望自己不会再忘。
