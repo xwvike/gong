@@ -88,9 +88,9 @@
 <script>
   const g = window.gong;
 
-  // 多屏时每块屏各跑一份互不知情的实例。时钟只在 0 号屏出现，
+  // 多屏时每块屏各跑一份互不知情的实例。时钟只在主屏出现，
   // 六管辉光在副屏上复制一份既没意义又费电。
-  const primary = g.screen.index === 0;
+  const primary = g.screen.primary;
 
   const rig = document.getElementById('rig');
   const msg = document.getElementById('msg');

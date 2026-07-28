@@ -457,23 +457,30 @@ func cmdFire(args []string) error {
 		return err
 	}
 
+	now := time.Now()
 	var s *config.Schedule
+	var target time.Time
 	if len(args) > 0 {
 		// 带名字的调法只为兼容 0.1.0 遗留的 per-name plist，
 		// 那些 plist 会在下次 gong on 时被清掉。
 		if s, _ = c.Find(args[0]); s == nil {
 			return fmt.Errorf("配置里没有定时 %q", args[0])
 		}
+		target = agent.TargetFor(*s, now)
 	} else {
 		// 所有定时共用一个 job，launchd 不会告诉我们是谁触发的，按时间反查。
 		// 猜错也不至于出事：壳自己的时间窗判断会把不该放的挡掉。
-		s = agent.Match(c, time.Now())
-		if s == nil {
+		match := agent.MatchTarget(c, now)
+		if match == nil {
 			return nil // 一条启用的都没有，安静退出
 		}
+		s, target = match.Schedule, match.Target
 	}
 	if !s.Enabled {
 		return nil // 停用了就安静退出，不该是错误
+	}
+	if target.IsZero() {
+		return fmt.Errorf("无法计算定时 %q 的目标时刻", s.Name)
 	}
 	th, err := theme.Resolve(s.Theme)
 	if err != nil {
@@ -486,13 +493,20 @@ func cmdFire(args []string) error {
 
 	// TODO 收摊动作在这里跑，跑完再 exec 到壳
 
-	argv := []string{overlay,
+	argv := overlayArgs(overlay, *s, th, target)
+	return syscall.Exec(overlay, argv, os.Environ())
+}
+
+// overlayArgs 将一次定时完整地交给壳。--at 保留给旧版壳和人工调用，
+// --target 才是本次触发对应的绝对目标时刻，避免跨午夜时按「今天」解析。
+func overlayArgs(overlay string, s config.Schedule, th theme.Theme, target time.Time) []string {
+	return []string{overlay,
 		"--at", config.FormatClock(s.Seconds()),
+		"--target", strconv.FormatInt(target.Unix(), 10),
 		"--lead", strconv.Itoa(th.LeadSeconds()),
 		"--grace", strconv.Itoa(s.Grace),
 		"--timeout", strconv.Itoa(th.TimeoutSeconds()),
 		"--name", s.Name,
 		"--theme", th.HTML,
 	}
-	return syscall.Exec(overlay, argv, os.Environ())
 }

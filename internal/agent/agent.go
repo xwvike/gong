@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -35,12 +36,7 @@ type Trigger struct {
 
 // ComputeTrigger 把「几点几分几秒 + 提前多少秒」换算成 launchd 能表达的触发点。
 func ComputeTrigger(atSeconds, lead int, weekdays []int) Trigger {
-	t := atSeconds - lead
-	dayShift := 0
-	for t < 0 { // 跨回前一天：00:00:02 提前 5 秒是昨天 23:59:57
-		t += 86400
-		dayShift--
-	}
+	t, dayShift := triggerTimeOfDay(atSeconds, lead)
 	minuteOfDay := t / 60 // 向下取整到分钟，宁可早一点也不能晚
 
 	days := make([]int, 0, len(weekdays))
@@ -54,6 +50,15 @@ func ComputeTrigger(atSeconds, lead int, weekdays []int) Trigger {
 	}
 	sort.Ints(days)
 	return Trigger{Hour: minuteOfDay / 60, Minute: minuteOfDay % 60, Weekdays: days}
+}
+
+func triggerTimeOfDay(atSeconds, lead int) (seconds, dayShift int) {
+	seconds = atSeconds - lead
+	for seconds < 0 { // 跨回前一天：00:00:02 提前 5 秒是昨天 23:59:57
+		seconds += 86400
+		dayShift--
+	}
+	return seconds, dayShift
 }
 
 // Occurrences 给出这个触发点在 now 前后一天内的所有绝对时刻，用来反查是哪条定时。
@@ -75,11 +80,96 @@ func (t Trigger) Occurrences(now time.Time) []time.Time {
 
 // TriggerFor 算一条定时的触发点，主题找不到时按 lead=0 处理。
 func TriggerFor(s config.Schedule) Trigger {
-	lead := 0
+	return ComputeTrigger(s.Seconds(), scheduleLead(s), s.Weekdays)
+}
+
+// scheduleLead 返回生成 launchd 触发点时使用的提前秒数。
+//
+// 主题不存在时跟 TriggerFor 一样按 lead=0 处理；真正执行时 cmdFire
+// 还会再次解析主题并报错。保持这里的回退行为可以让反查在配置暂时损坏时
+// 仍然是确定的，不会因为反查本身 panic。
+func scheduleLead(s config.Schedule) int {
 	if th, err := theme.Resolve(s.Theme); err == nil {
-		lead = th.LeadSeconds()
+		return th.LeadSeconds()
 	}
-	return ComputeTrigger(s.Seconds(), lead, s.Weekdays)
+	return 0
+}
+
+// targetForTrigger 把 launchd 的触发点还原成定时真正的目标时刻。
+//
+// StartCalendarInterval 只能精确到分钟，而提前亮相还可能把触发点推到
+// 前一天。仅把 at 的时分秒套到「今天」会在这种情况下得到错误日期（例如
+// 周一 00:00:02、lead=5 会在周日 23:59 被拉起）。这里复用 ComputeTrigger
+// 的日偏移规则，从触发点的日期还原目标日期，再写入原始秒数。
+func targetForTrigger(s config.Schedule, trigger time.Time) time.Time {
+	at := s.Seconds()
+	_, dayShift := triggerTimeOfDay(at, scheduleLead(s))
+	day := trigger.AddDate(0, 0, -dayShift)
+	return time.Date(day.Year(), day.Month(), day.Day(),
+		at/3600, (at/60)%60, at%60, 0, day.Location())
+}
+
+// nearestTrigger 找出一个定时离 now 最近的 launchd 触发点。
+func nearestTrigger(t Trigger, now time.Time) (time.Time, bool) {
+	var best time.Time
+	bestDelta := time.Duration(math.MaxInt64)
+	for _, cand := range t.Occurrences(now) {
+		d := now.Sub(cand)
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDelta {
+			best, bestDelta = cand, d
+		}
+	}
+	return best, !best.IsZero()
+}
+
+// MatchResult 是合并 plist 后的一次反查结果。launchd 不会告诉我们是哪条
+// 定时触发，所以除了 schedule 还要保留它对应的绝对目标时刻，交给 Swift
+// 壳使用；否则跨午夜时壳会把目标错误解析到触发日。
+type MatchResult struct {
+	Schedule *config.Schedule
+	Target   time.Time
+}
+
+// MatchTarget 反查「现在这一下是哪条定时」以及它的绝对目标时刻。
+func MatchTarget(c *config.Config, now time.Time) *MatchResult {
+	best, bestDelta := -1, time.Duration(math.MaxInt64)
+	var bestTrigger time.Time
+	for i := range c.Schedules {
+		if !c.Schedules[i].Enabled {
+			continue
+		}
+		trigger, ok := nearestTrigger(TriggerFor(c.Schedules[i]), now)
+		if !ok {
+			continue
+		}
+		d := now.Sub(trigger)
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDelta {
+			best, bestDelta, bestTrigger = i, d, trigger
+		}
+	}
+	if best < 0 {
+		return nil
+	}
+	return &MatchResult{
+		Schedule: &c.Schedules[best],
+		Target:   targetForTrigger(c.Schedules[best], bestTrigger),
+	}
+}
+
+// TargetFor 返回一条定时离 now 最近的目标时刻。带名字的旧版 plist 没有
+// 触发点参数，cmdFire 用这个函数补出同样的绝对日期。
+func TargetFor(s config.Schedule, now time.Time) time.Time {
+	trigger, ok := nearestTrigger(TriggerFor(s), now)
+	if !ok {
+		return time.Time{}
+	}
+	return targetForTrigger(s, trigger)
 }
 
 // Match 反查「现在这一下是哪条定时」。
@@ -88,25 +178,10 @@ func TriggerFor(s config.Schedule) Trigger {
 // 取触发点离 now 最近的那条。猜错也不至于出事——壳自己还有时间窗判断会把
 // 不该放的挡掉（比如睡醒后 launchd 补跑）。
 func Match(c *config.Config, now time.Time) *config.Schedule {
-	best, bestDelta := -1, time.Duration(math.MaxInt64)
-	for i := range c.Schedules {
-		if !c.Schedules[i].Enabled {
-			continue
-		}
-		for _, cand := range TriggerFor(c.Schedules[i]).Occurrences(now) {
-			d := now.Sub(cand)
-			if d < 0 {
-				d = -d
-			}
-			if d < bestDelta {
-				best, bestDelta = i, d
-			}
-		}
+	if result := MatchTarget(c, now); result != nil {
+		return result.Schedule
 	}
-	if best < 0 {
-		return nil
-	}
-	return &c.Schedules[best]
+	return nil
 }
 
 // Plist 生成那唯一一个 launchd 配置，把所有启用定时的触发点并进去。
@@ -202,7 +277,9 @@ func Bootout() error { return bootoutLabel(paths.Label) }
 // Bootstrap 接管。先 bootout 再 bootstrap，
 // 否则对已加载的 label 会报 "Bootstrap failed: 5: Input/output error"。
 func Bootstrap() error {
-	_ = Bootout()
+	if err := Bootout(); err != nil {
+		return err
+	}
 	out, err := run("bootstrap", domain(), paths.PlistFile())
 	if err != nil {
 		return fmt.Errorf("launchctl bootstrap: %s", out)
@@ -239,6 +316,10 @@ type SyncResult struct {
 // Sync 把磁盘上的 plist 对齐到配置。幂等，可以随便重复跑。
 func Sync(c *config.Config, gongPath string) SyncResult {
 	var res SyncResult
+	if err := c.Validate(); err != nil {
+		res.Errors = append(res.Errors, err)
+		return res
+	}
 
 	if err := os.MkdirAll(paths.LaunchAgents(), 0o755); err != nil {
 		res.Errors = append(res.Errors, err)
@@ -258,6 +339,7 @@ func Sync(c *config.Config, gongPath string) SyncResult {
 		res.Cleaned = append(res.Cleaned, name)
 	}
 
+	var valid []config.Schedule
 	for _, s := range c.Schedules {
 		if !s.Enabled {
 			continue
@@ -267,6 +349,7 @@ func Sync(c *config.Config, gongPath string) SyncResult {
 			continue
 		}
 		res.Active = append(res.Active, s.Name)
+		valid = append(valid, s)
 	}
 
 	if len(res.Active) == 0 {
@@ -281,7 +364,7 @@ func Sync(c *config.Config, gongPath string) SyncResult {
 		return res
 	}
 
-	if err := os.WriteFile(paths.PlistFile(), Plist(gongPath, c.Schedules), 0o644); err != nil {
+	if err := writePlist(Plist(gongPath, valid)); err != nil {
 		res.Errors = append(res.Errors, err)
 		return res
 	}
@@ -289,6 +372,37 @@ func Sync(c *config.Config, gongPath string) SyncResult {
 		res.Errors = append(res.Errors, err)
 	}
 	return res
+}
+
+// writePlist 用同目录临时文件再 rename，避免 launchd 在写入中途读到半份 XML。
+func writePlist(data []byte) error {
+	path := paths.PlistFile()
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if err := tmp.Chmod(0o644); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 // legacyInstalled 找出 0.1.0 留下的 local.gong.<name>.plist。

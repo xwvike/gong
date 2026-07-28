@@ -22,6 +22,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Go 单测与静态检查
+        run: |
+          set -euxo pipefail
+          go test ./...
+          go vet ./...
+
+      - name: 校验 Homebrew formula 语法
+        run: ruby -c packaging/gong.rb
+
       - name: 版本号
         id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"

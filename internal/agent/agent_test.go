@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xwvike/gong/internal/config"
+	"github.com/xwvike/gong/internal/paths"
 )
 
 func TestComputeTrigger(t *testing.T) {
@@ -110,11 +111,34 @@ func TestMatchNoneEnabled(t *testing.T) {
 
 // 周日午夜前触发的定时，星期已经被移到周六，反查时也得对得上
 func TestMatchAcrossMidnight(t *testing.T) {
-	c := &config.Config{Schedules: []config.Schedule{sched("mid", "00:00:02", []int{1})}}
-	// 周一 00:00:02 提前 0 秒 → 触发点周一 00:00
-	got := Match(c, mon(0, 0, 1))
-	if got == nil || got.Name != "mid" {
+	s := sched("mid", "00:00:02", []int{1})
+	s.Theme = "nixie" // lead=5：周一目标会在周日 23:59 被拉起
+	c := &config.Config{Schedules: []config.Schedule{s}}
+	// 触发点在周日，反查结果仍必须指向周一的目标日期。
+	now := time.Date(2026, 7, 26, 23, 59, 0, 0, time.Local)
+	got := MatchTarget(c, now)
+	if got == nil || got.Schedule.Name != "mid" {
 		t.Fatalf("跨午夜的定时没匹配上，拿到 %v", got)
+	}
+	want := time.Date(2026, 7, 27, 0, 0, 2, 0, time.Local)
+	if !got.Target.Equal(want) {
+		t.Fatalf("目标时刻 = %s，想要 %s", got.Target, want)
+	}
+
+	// 到了午夜后再执行（例如 launchd 有一点延迟）也不能退回周日。
+	got = MatchTarget(c, time.Date(2026, 7, 27, 0, 0, 1, 0, time.Local))
+	if got == nil || !got.Target.Equal(want) {
+		t.Fatalf("午夜后的目标时刻 = %v，想要 %s", got, want)
+	}
+}
+
+func TestTargetForUsesNearestAbsoluteDate(t *testing.T) {
+	s := sched("mid", "00:00:02", []int{1})
+	s.Theme = "nixie"
+	now := time.Date(2026, 7, 26, 23, 59, 10, 0, time.Local)
+	want := time.Date(2026, 7, 27, 0, 0, 2, 0, time.Local)
+	if got := TargetFor(s, now); !got.Equal(want) {
+		t.Fatalf("TargetFor = %s，想要 %s", got, want)
 	}
 }
 
@@ -188,5 +212,46 @@ func TestLegacyScanIgnoresCurrentPlist(t *testing.T) {
 	want := []string{"evening", "noon"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("扫到 %v，应该只有 %v（不含当前那份 local.gong.plist）", got, want)
+	}
+}
+
+func TestWritePlistReplacesFileWithoutLeavingTemp(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	if err := os.MkdirAll(filepath.Dir(paths.PlistFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePlist([]byte("new plist")); err != nil {
+		t.Fatalf("writePlist() error = %v", err)
+	}
+	got, err := os.ReadFile(paths.PlistFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new plist" {
+		t.Fatalf("plist = %q, want %q", got, "new plist")
+	}
+	entries, err := os.ReadDir(filepath.Dir(paths.PlistFile()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".local.gong.plist.tmp-") {
+			t.Errorf("temporary plist left behind: %s", entry.Name())
+		}
+	}
+}
+
+func TestSyncRejectsInvalidConfigBeforeWriting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := &config.Config{Schedules: []config.Schedule{{
+		Name: "bad", At: "25:00", Weekdays: []int{1}, Theme: "default", Enabled: true,
+	}}}
+	res := Sync(c, "/tmp/gong")
+	if len(res.Errors) != 1 {
+		t.Fatalf("Sync() errors = %v, want one validation error", res.Errors)
+	}
+	if _, err := os.Stat(paths.PlistFile()); !os.IsNotExist(err) {
+		t.Fatalf("invalid config wrote a plist: %v", err)
 	}
 }

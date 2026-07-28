@@ -9,6 +9,7 @@
 
 import Cocoa
 import WebKit
+import Darwin
 
 // ── 写死的闸门。主题改不了，flag 也调不高。 ────────────────
 let maxVisibleSeconds = 60.0    // 浮层可见时长上限，从 orderFront 那一刻算
@@ -21,12 +22,15 @@ let heartbeatInterval = 0.1     // 壳给页面喂时间的节拍
 
 struct Options {
     var at: (h: Int, m: Int, s: Int)?
+    // Go 侧传入本次触发对应的绝对 Unix 时间，避免跨午夜时按「今天」解析 --at。
+    var targetEpoch: Double?
     var lead = 0
     var grace = 1200            // 秒。超出这个窗口就不放（防止睡醒后 launchd 补播）
     var timeout = 20.0          // 主题不喊 done 时的可见兜底
     var name = ""               // 只用来给 stderr 打标，不注入页面
     var theme = ""
     var force = false           // 跳过时间窗和全屏判断，gong vis 预览走这条
+    var invalid = false
 }
 
 func parseArgs() -> Options {
@@ -47,20 +51,61 @@ func parseArgs() -> Options {
         i += 1
         return pending[i]
     }
+    func reportInvalid(_ message: String) {
+        o.invalid = true
+        FileHandle.standardError.write("gong-overlay: \(message)\n".data(using: .utf8)!)
+    }
     while i < pending.count {
         let arg = pending[i]
         switch arg {
         case "--force":   o.force = true
-        case "--at":      o.at = parseClock(next() ?? "")
-        case "--lead":    o.lead = min(max(Int(next() ?? "") ?? 0, 0), maxLeadSeconds)
-        case "--grace":   o.grace = max(Int(next() ?? "") ?? 1200, 0)
-        case "--timeout": o.timeout = min(Double(next() ?? "") ?? 20, maxVisibleSeconds)
-        case "--name":    o.name = next() ?? ""
-        case "--theme":   o.theme = next() ?? ""
+        case "--at":
+            let raw = next() ?? ""
+            if let at = parseClock(raw) {
+                o.at = at
+            } else {
+                reportInvalid("invalid --at")
+            }
+        case "--target":
+            if let raw = next(), let epoch = Double(raw), epoch.isFinite {
+                o.targetEpoch = epoch
+            } else {
+                reportInvalid("invalid --target")
+            }
+        case "--lead":
+            if let raw = next(), let value = Int(raw) {
+                o.lead = min(max(value, 0), maxLeadSeconds)
+            } else {
+                reportInvalid("invalid --lead")
+            }
+        case "--grace":
+            if let raw = next(), let value = Int(raw) {
+                o.grace = max(value, 0)
+            } else {
+                reportInvalid("invalid --grace")
+            }
+        case "--timeout":
+            if let raw = next(), let value = Double(raw), value.isFinite {
+                o.timeout = min(max(value, 0), maxVisibleSeconds)
+            } else {
+                reportInvalid("invalid --timeout")
+            }
+        case "--name":
+            if let value = next() {
+                o.name = value
+            } else {
+                reportInvalid("missing --name value")
+            }
+        case "--theme":
+            if let value = next() {
+                o.theme = value
+            } else {
+                reportInvalid("missing --theme value")
+            }
         case let other where other.hasPrefix("--"):
             // 认不出来的 flag 要喊一声：Go 侧改了参数而壳没跟上时，
             // 沉默的后果是它的值被当成主题路径吞掉，然后一切静悄悄地跑歪。
-            FileHandle.standardError.write("gong-overlay: unknown flag \(other)\n".data(using: .utf8)!)
+            reportInvalid("unknown flag \(other)")
         default:
             // 位置参数当主题路径，兼容老的 `gong-overlay <html>` 调法
             if o.theme.isEmpty { o.theme = arg }
@@ -72,10 +117,13 @@ func parseArgs() -> Options {
 
 /// "18:00" / "18:00:00" → (18, 0, 0)
 func parseClock(_ s: String) -> (h: Int, m: Int, s: Int)? {
-    let parts = s.split(separator: ":").map { Int($0) }
-    guard parts.count >= 2, let h = parts[0], let m = parts[1], (0...23).contains(h), (0...59).contains(m)
+    let parts = s.split(separator: ":", omittingEmptySubsequences: false)
+    guard (2...3).contains(parts.count),
+          let h = Int(parts[0]), let m = Int(parts[1]),
+          (0...23).contains(h), (0...59).contains(m)
     else { return nil }
-    let sec = parts.count > 2 ? (parts[2] ?? 0) : 0
+    let sec = parts.count == 3 ? (Int(parts[2]) ?? -1) : 0
+    guard (0...59).contains(sec) else { return nil }
     return (h, m, sec)
 }
 
@@ -99,11 +147,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         NSApp.setActivationPolicy(.accessory)
 
         opts = parseArgs()
+        guard !opts.invalid else { Darwin.exit(2) }
         let now = Date()
         let target = resolveTarget(now: now)
 
         guard opts.force || (insideTimeWindow(now: now, target: target) && !fullscreenAppInFront())
-        else { NSApp.terminate(nil); return }
+        else { Darwin.exit(0) }
 
         let path = opts.theme.isEmpty
             ? (NSHomeDirectory() as NSString).appendingPathComponent(".config/gong/themes/default/index.html")
@@ -111,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         let html = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: html.path) else {
             FileHandle.standardError.write("gong-overlay: theme not found: \(html.path)\n".data(using: .utf8)!)
-            NSApp.terminate(nil); return
+            Darwin.exit(1)
         }
 
         // 先把 panel 建好、页面加载好，但【不 orderFront】——屏幕上什么都没有。
@@ -163,6 +212,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     /// --force 时没有真实的目标时刻，就拿「现在 + lead」当靶子，
     /// 这样倒计时类主题预览时也有东西可倒。
     private func resolveTarget(now: Date) -> Date {
+        // `--target` 是 Go 根据匹配到的 launchd 触发点还原出的绝对时刻。
+        // 优先使用它；`--at` 仍保留给旧版调用方和手工调试。
+        if let epoch = opts.targetEpoch {
+            return Date(timeIntervalSince1970: epoch)
+        }
         guard let at = opts.at else { return now.addingTimeInterval(Double(opts.lead)) }
         var c = Calendar.current.dateComponents([.year, .month, .day], from: now)
         (c.hour, c.minute, c.second) = (at.h, at.m, at.s)
@@ -238,6 +292,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     /// 等于把表现逻辑漏回配置层。要不同的提醒形式就写不同的主题。
     private func bootstrapJS(screen: NSScreen, index: Int, total: Int,
                              target: Date, now: Date) -> String {
+        // NSScreen.screens 的数组顺序不是主屏契约；只有在主屏不可用时才回退到 0 号。
+        let isPrimary = NSScreen.main == nil ? index == 0 : screen == NSScreen.main
         let gong: [String: Any] = [
             "target": (target.timeIntervalSince1970 * 1000).rounded(),
             "now": (now.timeIntervalSince1970 * 1000).rounded(),
@@ -249,6 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             "screen": [
                 "index": index,
                 "isMain": screen == NSScreen.main,
+                "primary": isPrimary,
                 "w": screen.frame.width,
                 "h": screen.frame.height,
                 "scale": screen.backingScaleFactor,
@@ -289,9 +346,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
           };
           // 主题契约：动画结束必须喊这一声，壳才会退出。没喊到的话有兜底超时。
           // 多屏时每块屏是一个互不知情的 WebView 实例，任何一个喊 done 都会带走整个进程，
-          // 所以只认 0 号屏那一份，其余的调了也没用。
+          // 所以只认主屏那一份。
           window.gong.done = function () {
-            if (window.gong.screen.index !== 0) return;
+            if (!window.gong.screen.primary) return;
             window.webkit.messageHandlers.done.postMessage(1);
           };
 
@@ -354,8 +411,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     /// 遍历 layer 0 的窗口、看有没有 bounds 铺满整屏的——只读 bounds，绝对不要读窗口标题，
     /// 读标题会触发屏幕录制权限申请。
     private func fullscreenAppInFront() -> Bool {
-        guard let s = NSScreen.main else { return false }
-        return s.visibleFrame.height >= s.frame.height
+        NSScreen.screens.contains { screen in
+            screen.visibleFrame.height >= screen.frame.height
+        }
     }
 }
 

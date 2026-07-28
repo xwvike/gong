@@ -323,7 +323,7 @@ window.gong = {
   revealed: false,
   fired:    false,
   screens: 1,
-  screen:  { index: 0, isMain: true, w: 1512, h: 982, scale: 2 },
+  screen:  { index: 0, isMain: true, primary: true, w: 1512, h: 982, scale: 2 },
 
   onReveal: undefined,       // 壳亮相时调（target - lead）
   onTick:   undefined,       // 壳每 100ms 调一次，参数是当前毫秒
@@ -339,7 +339,7 @@ window.gong = {
 1. **动画必须挂在 `html.gong-live` 下面。** 页面是被壳提前加载好的，按 `load` 起算会跑偏几十秒。
 2. **`target` 是绝对时间戳。** 主题不用关心自己是提前 5 秒还是 60 秒被亮出来的。
 3. **主题里不要写 `setTimeout` / `setInterval` / `requestAnimationFrame` 来卡点。** 用 `onTick` / `onFire`，理由见下。
-4. **多屏时每块屏是一个互不知情的 WebView 实例。** 任何一个喊 done 都会带走整个进程，所以壳里只认 `screen.index === 0` 那一份，其余的调了直接 return。要判断「这块屏该不该画」用 `gong.screen`。
+4. **多屏时每块屏是一个互不知情的 WebView 实例。** 任何一个喊 done 都会带走整个进程，所以壳里只认 `screen.primary === true` 那一份，其余的调了直接 return。`screen.index` 只是数组位置，不代表主屏；要判断「这块屏该不该画」用 `gong.screen.primary`。
 5. **常驻 CSS 动画不要挂在带 `filter` 的元素上**，见第四节。
 
 ### 时间归壳，像素归主题

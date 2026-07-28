@@ -88,6 +88,9 @@ func load(dir string, builtin bool) (Theme, error) {
 
 // Resolve 按「用户目录优先」找主题。
 func Resolve(id string) (Theme, error) {
+	if id == "" || id == "." || id == ".." || filepath.Base(id) != id {
+		return Theme{}, fmt.Errorf("主题名 %q 非法", id)
+	}
 	for _, root := range []struct {
 		dir     string
 		builtin bool

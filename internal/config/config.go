@@ -59,6 +59,11 @@ func Load() (*Config, error) {
 			c.Schedules[i].Grace = DefaultGrace
 		}
 	}
+	// 配置文件可以被手动编辑，所以读取时也要校验，避免 gong fire
+	// 绕过交互式保存入口直接使用坏配置。
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
 	return &c, nil
 }
 
@@ -71,6 +76,9 @@ func LoadOrDefault() (*Config, error) {
 }
 
 func (c *Config) Save() error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(paths.ConfigDir(), 0o755); err != nil {
 		return err
 	}
@@ -190,6 +198,9 @@ func (s Schedule) WeekdaysLabel() string {
 
 // Validate 在保存前挡住会生成坏 plist 的配置。
 func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("配置不能为空")
+	}
 	seen := map[string]bool{}
 	for _, s := range c.Schedules {
 		if s.Name == "" {
@@ -208,8 +219,19 @@ func (c *Config) Validate() error {
 		if len(s.Weekdays) == 0 {
 			return fmt.Errorf("定时 %s 一个星期几都没选", s.Name)
 		}
+		for _, d := range s.Weekdays {
+			if d < 0 || d > 7 {
+				return fmt.Errorf("定时 %s：星期几必须是 0 到 7，收到 %d", s.Name, d)
+			}
+		}
 		if s.Theme == "" {
 			return fmt.Errorf("定时 %s 没有主题", s.Name)
+		}
+		if s.Theme == "." || s.Theme == ".." || strings.ContainsAny(s.Theme, `/\\`) {
+			return fmt.Errorf("定时 %s：主题名不能含路径分隔符", s.Name)
+		}
+		if s.Grace < 0 {
+			return fmt.Errorf("定时 %s：grace 不能是负数", s.Name)
 		}
 	}
 	return nil

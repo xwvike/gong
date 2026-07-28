@@ -61,6 +61,8 @@ window.gong.onTick   = (now) => { /* 壳每 100ms 喂一次时间 */ };
 window.gong.done();                     // 放完了，通知壳退出
 ```
 
+多屏主题可用 `window.gong.screen.primary` 判断当前实例是不是主屏；不要假设 `screen.index === 0` 一定是主屏。
+
 三条要紧的：
 
 1. **动画挂在 `html.gong-live` 下面**。页面是被提前加载好的，按 `load` 起算会跑偏。到点后还会多一个 `html.gong-fired`，纯 CSS 主题可以一行 JS 都不写。
