@@ -2,94 +2,347 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>gong · default</title>
+<title>gong · led</title>
 <style>
   /* 背景必须真透明——壳那边已经关掉 WebView 的绘制背景了 */
   html, body { margin:0; height:100%; background:transparent; overflow:hidden;
                -webkit-user-select:none; cursor:none; }
 
-  :root {
-    --ink:   rgba(11,13,17,.94);
-    --amber: #F2C14E;
-    --dim:   rgba(242,193,78,.34);
+  /* 一条 LED 信号带贴在屏幕顶部，不挡视线中央，个头也不用那么大——
+     这不是要人盯着看的主视觉，扫一眼知道时间和状态就够了。
+     band 本身只管出现/收起的过渡，画面全交给里面的 canvas。 */
+  .band {
+    position: fixed; left: 0; right: 0; top: 4vh; height: 9vh;
+    transform: scaleY(.4); opacity: 0;
+    transition: opacity .55s ease-out, transform .55s cubic-bezier(.2,.8,.2,1);
+    will-change: opacity, transform;
   }
+  html.gong-live .band { opacity: 1; transform: scaleY(1); }
+  .band.leaving { opacity: 0; transform: scaleY(.92); }
 
-  /* 上下两道闸门，从屏幕边缘压进来又收回去。中间留空——
-     不遮住你正在看的东西，是它敢做得这么大的前提。 */
-  .shutter { position:fixed; left:0; right:0; height:26vh; background:var(--ink);
-             transform:translateY(var(--hide)); will-change:transform; }
-  .top    { top:0;    --hide:-100%; }
-  .bottom { bottom:0; --hide:100%; }
+  canvas { display: block; width: 100%; height: 100%; }
 
-  @keyframes slam { to { transform:translateY(0); } }
-  @keyframes lift { to { transform:translateY(var(--hide)); } }
-
-  .hair { position:fixed; left:0; right:0; height:1px; background:var(--amber); opacity:0; }
-  .hair.a { top:26vh; } .hair.b { bottom:26vh; }
-  @keyframes flash { to { opacity:.7; } }
-  @keyframes fade  { to { opacity:0; } }
-
-  .stack { position:fixed; top:0; left:0; right:0; height:26vh;
-           display:flex; flex-direction:column; justify-content:center;
-           padding-left:7vw; gap:.4rem; }
-
-  .eyebrow { font:500 clamp(11px,1vw,15px)/1 ui-monospace,"SF Mono",monospace;
-             letter-spacing:.42em; color:var(--dim); text-transform:uppercase; }
-
-  .word { font:800 clamp(52px,9vw,168px)/.86 "PingFang SC",-apple-system,sans-serif;
-          letter-spacing:-.02em; color:var(--amber); }
-
-  /* 每个字单独错峰落下，比整块淡入有分量 */
-  .word span { display:inline-block; transform:translateY(.5em); opacity:0; }
-  @keyframes drop { to { transform:none; opacity:1; } }
-
-  .note { position:fixed; bottom:0; left:0; right:0; height:26vh;
-          display:flex; align-items:center; justify-content:flex-end;
-          padding-right:7vw;
-          font:400 clamp(13px,1.3vw,20px)/1 "PingFang SC",-apple-system,sans-serif;
-          letter-spacing:.28em; color:var(--dim); opacity:0; }
-
-  /* 页面是被壳提前加载好的，动画一律挂在 .gong-live 下面，
-     等壳喊 reveal 才起跑。按 load 起算会跑偏几十秒。 */
-  html.gong-live .shutter { animation:slam .5s cubic-bezier(.2,.9,.2,1) forwards,
-                                      lift .6s cubic-bezier(.6,0,.8,1) 4.6s forwards; }
-  html.gong-live .hair    { animation:flash .4s ease-out .42s forwards,
-                                      fade  .4s ease-in  4.6s forwards; }
-  html.gong-live .word span { animation:drop .5s cubic-bezier(.16,1,.3,1) forwards; }
-  html.gong-live .note    { animation:flash .6s ease-out 1s forwards,
-                                      fade  .4s ease-in  4.6s forwards; }
-
-  @media (prefers-reduced-motion:reduce) { * { animation-duration:.01ms !important; } }
+  @media (prefers-reduced-motion: reduce) {
+    .band { transition-duration: .01ms; }
+  }
 </style>
 </head>
 <body>
-  <div class="shutter top"></div>
-  <div class="shutter bottom"></div>
-  <div class="hair a"></div><div class="hair b"></div>
-
-  <div class="stack">
-    <div class="eyebrow">shift complete</div>
-    <div class="word" id="w">收工</div>
-  </div>
-  <div class="note">合上电脑 · 剩下的明天再说</div>
+  <div class="band" id="band"><canvas id="led"></canvas></div>
 
 <script>
-  // 文案写死在主题里。壳不传内容参数——要换话术就换主题，
-  // 不要指望用一个 --message 把同一套动画复用成十种提醒。
-  const w = document.getElementById('w');
+(() => {
+  'use strict';
 
-  // 逐字错峰。delay 写在 style 上，动画本体由 .gong-live 触发。
-  w.innerHTML = [...w.textContent]
-    .map((c, i) => `<span style="animation-delay:${.5 + i * .09}s">${c}</span>`).join('');
+  const g = window.gong;
 
-  // 动画全靠 CSS，JS 只负责在动画放完后喊一声退出。
-  // 用壳的心跳而不是 setTimeout —— 页面里的定时器在重绘压力下会被拖到几秒甚至不来。
-  let t0 = 0;
-  window.gong.onReveal = () => { t0 = window.gong.now || Date.now(); };
-  window.gong.onTick = (now) => {
-    // 主题契约：动画结束必须喊这一声，壳才会退出。没喊到的话壳有兜底超时。
-    if (t0 && now - t0 >= 5400) window.gong.done();
+  // ── 这些是「props」，原来的 React 组件靠调用方传，静态主题没有调用方，
+  //    只能写死在这——想换文案/配色/速度，改这一段就行。 ──────────────
+  const CONFIG = {
+    separator: '●',
+    // 原组件的 speed 是「每秒滚多少列」，配的是它自己 demo 里那个小预览框。
+    // gong 是全屏浮层，同样的列速度换算成像素/秒会因为屏幕大小、cell 尺寸
+    // 而完全不一样——按「每秒滚多少像素」算才是跟屏幕无关的量，这里选了一个
+    // 阅读节奏舒服的速度，觉得还是快/慢就直接改这个数。
+    speedPxPerSec: 130,
+    direction: 'left',     // left | right
+    // 原组件的 dotSize 是像素绝对值（默认 18），跟它默认 cell ≈ 120/7 ≈ 17px
+    // 几乎相等——点的直径本来就该顶满格子边长甚至略微重叠，才是真实 LED
+    // 点阵那种连成一片的效果，不是留出大把间隙的圆点阵列。
+    dotSize: 1.1,
+    dotShape: 'round',     // round | square
+    dotQuantity: 10,       // 1..20，决定点阵有多少「行分辨率」
+    spread: 1,             // 字符间距，单位是空白列数
+    onColor: '#DA1E1E',
+    offColor: null, // 没点亮的珠子就是纯透明——加一点暗红描边纯属多余的装饰
+    glowStrength: .6,
+    glowSize: 10,
+    // 原组件带的「不稳定信号板」噪声闪烁——每秒亮暗抖好几次，看着像刷新故障，
+    // 关掉。glow 留着，只是不要这个周期性的忽暗忽亮。
+    flickerStrength: 0,
+    flickerSpeed: 5,
+    // 内容是活的时钟，不是一句固定短语，不需要等它滚完一整轮才算「看到了」——
+    // 真实信号板本来就是长期跑着，路过瞄一眼是常态。这个时长只是给「提醒出现过」
+    // 留够反应时间。
+    visibleMs: 6400,
+    fadeMs: 500,
   };
+
+  const ROWS = 7;
+  const GLYPH_COLS = 5;
+  const QUANTITY_MID = 10;
+  const QUANTITY_MIN_ROWS = 3;
+  const QUANTITY_MAX_ROWS = 21;
+  const WORD_GAP_EXTRA = 3;
+  const SEPARATOR_PAD_EXTRA = 5;
+
+  // 5x7 点阵字体，逐列位图。只porting原组件覆盖的可见 ASCII 范围。
+  const FONT = [
+    [0x00,0x00,0x00,0x00,0x00], [0x00,0x00,0x5f,0x00,0x00], [0x00,0x07,0x00,0x07,0x00],
+    [0x14,0x7f,0x14,0x7f,0x14], [0x24,0x2a,0x7f,0x2a,0x12], [0x23,0x13,0x08,0x64,0x62],
+    [0x36,0x49,0x55,0x22,0x50], [0x00,0x05,0x03,0x00,0x00], [0x00,0x1c,0x22,0x41,0x00],
+    [0x00,0x41,0x22,0x1c,0x00], [0x14,0x08,0x3e,0x08,0x14], [0x08,0x08,0x3e,0x08,0x08],
+    [0x00,0x50,0x30,0x00,0x00], [0x08,0x08,0x08,0x08,0x08], [0x00,0x60,0x60,0x00,0x00],
+    [0x20,0x10,0x08,0x04,0x02], [0x3e,0x51,0x49,0x45,0x3e], [0x00,0x42,0x7f,0x40,0x00],
+    [0x42,0x61,0x51,0x49,0x46], [0x21,0x41,0x45,0x4b,0x31], [0x18,0x14,0x12,0x7f,0x10],
+    [0x27,0x45,0x45,0x45,0x39], [0x3c,0x4a,0x49,0x49,0x30], [0x01,0x71,0x09,0x05,0x03],
+    [0x36,0x49,0x49,0x49,0x36], [0x06,0x49,0x49,0x29,0x1e], [0x00,0x36,0x36,0x00,0x00],
+    [0x00,0x56,0x36,0x00,0x00], [0x00,0x08,0x14,0x22,0x41], [0x14,0x14,0x14,0x14,0x14],
+    [0x41,0x22,0x14,0x08,0x00], [0x02,0x01,0x51,0x09,0x06], [0x32,0x49,0x79,0x41,0x3e],
+    [0x7e,0x11,0x11,0x11,0x7e], [0x7f,0x49,0x49,0x49,0x36], [0x3e,0x41,0x41,0x41,0x22],
+    [0x7f,0x41,0x41,0x22,0x1c], [0x7f,0x49,0x49,0x49,0x41], [0x7f,0x09,0x09,0x01,0x01],
+    [0x3e,0x41,0x41,0x51,0x32], [0x7f,0x08,0x08,0x08,0x7f], [0x00,0x41,0x7f,0x41,0x00],
+    [0x20,0x40,0x41,0x3f,0x01], [0x7f,0x08,0x14,0x22,0x41], [0x7f,0x40,0x40,0x40,0x40],
+    [0x7f,0x02,0x04,0x02,0x7f], [0x7f,0x04,0x08,0x10,0x7f], [0x3e,0x41,0x41,0x41,0x3e],
+    [0x7f,0x09,0x09,0x09,0x06], [0x3e,0x41,0x51,0x21,0x5e], [0x7f,0x09,0x19,0x29,0x46],
+    [0x46,0x49,0x49,0x49,0x31], [0x01,0x01,0x7f,0x01,0x01], [0x3f,0x40,0x40,0x40,0x3f],
+    [0x1f,0x20,0x40,0x20,0x1f], [0x7f,0x20,0x18,0x20,0x7f], [0x63,0x14,0x08,0x14,0x63],
+    [0x03,0x04,0x78,0x04,0x03], [0x61,0x51,0x49,0x45,0x43], [0x00,0x00,0x7f,0x41,0x41],
+    [0x02,0x04,0x08,0x10,0x20], [0x41,0x41,0x7f,0x00,0x00], [0x04,0x02,0x01,0x02,0x04],
+    [0x40,0x40,0x40,0x40,0x40],
+  ];
+
+  const EXTRA = {
+    '●': [0x1c,0x3e,0x3e,0x3e,0x1c], '•': [0x00,0x1c,0x1c,0x1c,0x00],
+    '·': [0x00,0x00,0x18,0x00,0x00], '°': [0x00,0x03,0x03,0x00,0x00],
+    '★': [0x24,0x2a,0x7f,0x2a,0x24], '→': [0x08,0x08,0x2a,0x1c,0x08],
+    '←': [0x08,0x1c,0x2a,0x08,0x08],
+  };
+  const FOLD = { '–':'-', '—':'-', '‘':"'", '’':"'", '“':'"', '”':'"' };
+
+  function rowsForQuantity(quantity) {
+    const q = Math.min(20, Math.max(1, Math.round(quantity)));
+    const rows = q <= QUANTITY_MID
+      ? QUANTITY_MIN_ROWS + ((q - 1) * (ROWS - QUANTITY_MIN_ROWS)) / (QUANTITY_MID - 1)
+      : ROWS + ((q - QUANTITY_MID) * (QUANTITY_MAX_ROWS - ROWS)) / QUANTITY_MID;
+    return Math.max(1, Math.round(rows));
+  }
+
+  function glyphFor(char) {
+    const extra = EXTRA[char];
+    if (extra) return extra;
+    const folded = FOLD[char] || char;
+    const code = folded.toUpperCase().charCodeAt(0);
+    return FONT[code - 32] || FONT[0];
+  }
+
+  // 值噪声，偏向低位——信号板大部分时间稳稳亮着，偶尔猛地暗一下，
+  // 而不是均匀地一起一伏。纯函数、由外部时钟喂参数，不含自己的状态。
+  function flickerNoise(t) {
+    const i = Math.floor(t);
+    const f = t - i;
+    const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+    const smooth = f * f * (3 - 2 * f);
+    const value = hash(i) * (1 - smooth) + hash(i + 1) * smooth;
+    return value * value;
+  }
+
+  // 把 items 和分隔符拍平成一整条环形滚动带用的按列位图，词间距和分隔符
+  // 两侧的留白按「空白列数」直接计入，不用空白字形拼——间距跟着 spread 缩放
+  // 时才不会走样。
+  function buildColumns(items, separator, spread) {
+    const parts = (items || []).map(s => s.trim()).filter(Boolean);
+    const joiner = (separator || '').trim();
+    const columns = [];
+    const blanks = n => { for (let i = 0; i < n; i++) columns.push(0); };
+
+    const writeText = text => {
+      const chars = [...text];
+      chars.forEach((char, index) => {
+        if (char === ' ') { blanks(spread + WORD_GAP_EXTRA); return; }
+        const glyph = glyphFor(char);
+        for (let i = 0; i < GLYPH_COLS; i++) columns.push(glyph[i]);
+        const next = chars[index + 1];
+        if (next !== undefined && next !== ' ') blanks(spread);
+      });
+    };
+
+    if (parts.length === 0) { blanks(GLYPH_COLS + spread); return columns; }
+    for (const part of parts) {
+      writeText(part);
+      blanks(spread + SEPARATOR_PAD_EXTRA);
+      if (joiner) { writeText(joiner); blanks(spread + SEPARATOR_PAD_EXTRA); }
+    }
+    return columns;
+  }
+
+  // 不显示秒——字体是等宽的，位图每分钟才重建一次，比逐秒刷新的频率低得多。
+  function formatClock(ms) {
+    const d = new Date(ms);
+    const pad = n => String(n).padStart(2, '0');
+    return pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  // ── 到这里为止是纯算法，跟原组件逐行对应。下面开始接 gong 的生命周期。──
+
+  const band = document.getElementById('band');
+  const canvas = document.getElementById('led');
+  if (!g) { band.remove(); return; }
+
+  let columns = buildColumns([formatClock(g.now), 'CLOCK OUT'], CONFIG.separator, CONFIG.spread);
+  let total = columns.length;
+  let shownMinute = Math.floor(g.now / 60000);
+
+  const ctx = canvas.getContext('2d');
+  let dpr = 1, cell = 1, radius = 1, visibleCols = 0, boardRows = ROWS, yPad = 0, scale = 1;
+  let rowSource = [];
+  let offset = 0;          // 已经滚过多少「原生」列，随 rAF 的真实帧间隔推进
+  let lastFrameTime = 0;
+  let running = false;
+  let rafId = 0;
+
+  function measure() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = canvas.clientWidth || 800;
+    const h = canvas.clientHeight || 200;
+    canvas.width = Math.max(1, Math.round(w * dpr));
+    canvas.height = Math.max(1, Math.round(h * dpr));
+    boardRows = rowsForQuantity(CONFIG.dotQuantity);
+    scale = boardRows / ROWS;
+    // textSize 不写死像素——原组件是给固定预览框用的，这里是全屏浮层，
+    // 屏幕分辨率、band 高度都不固定，按 canvas 实际高度算更稳。
+    const textSize = canvas.height * 0.86;
+    cell = Math.max(1, textSize / boardRows);
+    radius = (cell * CONFIG.dotSize) / 2;
+    visibleCols = Math.ceil(canvas.width / cell) + 1;
+    yPad = (canvas.height - boardRows * cell) / 2;
+    rowSource = [];
+    for (let row = 0; row < boardRows; row++) rowSource.push(Math.min(ROWS - 1, Math.floor(row / scale)));
+  }
+
+  function dotPath(x, y) {
+    if (CONFIG.dotShape === 'square') {
+      const s = radius * 2;
+      ctx.rect(x - radius, y - radius, s, s);
+    } else {
+      ctx.moveTo(x + radius, y);
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+    }
+  }
+
+  function draw(time) {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const boardOffset = offset * scale;
+    const whole = Math.floor(boardOffset);
+    const shift = (boardOffset - whole) * cell;
+    const sign = CONFIG.direction === 'right' ? -1 : 1;
+    const xBase = -sign * shift;
+
+    // 没点亮的珠子不画——offColor 是 null 就直接跳过这一整趟，
+    // 没必要为一圈根本看不见的透明描边白跑一遍 fill。
+    if (CONFIG.offColor) {
+      ctx.beginPath();
+      for (let cx = 0; cx < visibleCols; cx++) {
+        const px = xBase + cx * cell + cell / 2;
+        for (let row = 0; row < boardRows; row++) dotPath(px, yPad + row * cell + cell / 2);
+      }
+      ctx.fillStyle = CONFIG.offColor;
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    for (let cx = 0; cx < visibleCols; cx++) {
+      const source = Math.floor((cx + sign * whole) / scale);
+      const index = ((source % total) + total) % total;
+      const bits = columns[index];
+      if (!bits) continue;
+      const px = xBase + cx * cell + cell / 2;
+      for (let row = 0; row < boardRows; row++) {
+        if (!((bits >> rowSource[row]) & 1)) continue;
+        dotPath(px, yPad + row * cell + cell / 2);
+      }
+    }
+
+    const wobble = CONFIG.flickerStrength > 0
+      ? 1 - CONFIG.flickerStrength * flickerNoise((time / 1000) * CONFIG.flickerSpeed)
+      : 1;
+    ctx.globalAlpha = wobble;
+    ctx.fillStyle = CONFIG.onColor;
+
+    if (CONFIG.glowStrength > 0) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.shadowColor = CONFIG.onColor;
+      ctx.shadowBlur = radius * 2 * CONFIG.glowSize;
+      ctx.globalAlpha = wobble * CONFIG.glowStrength;
+      ctx.fill();
+      ctx.restore();
+      ctx.globalAlpha = wobble;
+      ctx.fillStyle = CONFIG.onColor;
+    }
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // rAF 只管画面推进得顺不顺滑——用它自己的时间戳算这一帧滚了多少列，
+  // 纯粹是视觉插值。是否该收尾、是否该喊 done()，一律不问 rAF，问 gong.now
+  // （见下面 g.onTick）：业务时钟和画面时钟是两条不相交的线。
+  function frame(time) {
+    if (!running) return;
+    const dt = lastFrameTime ? Math.min((time - lastFrameTime) / 1000, .05) : 0;
+    lastFrameTime = time;
+    // 像素/秒换算成「列/秒」用当前的 cell 宽度，屏幕多大都滚得一样快。
+    offset = (offset + (CONFIG.speedPxPerSec / cell) * dt) % total;
+    draw(time);
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    if (running) return;
+    running = true;
+    lastFrameTime = 0;
+    measure();
+    draw(0);
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function stop() {
+    running = false;
+    if (rafId) cancelAnimationFrame(rafId);
+  }
+
+  let resizeObserver = null;
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => { measure(); draw(lastFrameTime); });
+    resizeObserver.observe(canvas);
+  }
+
+  measure();
+  draw(0); // 亮相前先画一帧预热，真正显示时首帧不再卡 shader/位图编译的开销
+
+  let revealedAt = 0;
+  let leavingAt = 0;
+  let doneSent = false;
+
+  g.onReveal = () => {
+    revealedAt = g.now;
+    start();
+  };
+
+  g.onTick = now => {
+    if (!revealedAt) return;
+
+    const minute = Math.floor(now / 60000);
+    if (minute !== shownMinute) {
+      shownMinute = minute;
+      columns = buildColumns([formatClock(now), 'CLOCK OUT'], CONFIG.separator, CONFIG.spread);
+      total = columns.length;
+    }
+
+    const elapsed = now - revealedAt;
+    if (!leavingAt && elapsed >= CONFIG.visibleMs) {
+      leavingAt = now;
+      band.classList.add('leaving');
+    }
+    if (leavingAt && !doneSent && now - leavingAt >= CONFIG.fadeMs) {
+      doneSent = true;
+      stop();
+      g.done(); // 每块屏各画各的，不用判断 primary——非主屏这一句会被壳注入的 gong.done 安静吃掉
+    }
+  };
+})();
 </script>
 </body>
 </html>
