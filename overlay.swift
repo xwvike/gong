@@ -18,7 +18,30 @@ let maxLeadSeconds = 60         // 提前亮相上限
 let earlySlackSeconds = 90.0    // 时间窗左边界的余量：launchd 只有分钟精度
 let recheckInterval = 5.0       // 亮相后多久复检一次全屏
 let heartbeatInterval = 0.1     // 壳给页面喂时间的节拍
+let themeAPIVersion = 1         // 只表示 window.gong 契约主版本，不跟 gong 发布版本走
+let maxJavaScriptSafeInteger = 9_007_199_254_740_991.0
 // ──────────────────────────────────────────────────────
+
+private struct ThemeAPIScreenV1: Encodable {
+    let index: Int
+    let isMain: Bool
+    let primary: Bool
+    let w: Double
+    let h: Double
+    let scale: Double
+}
+
+private struct ThemeAPIContextV1: Encodable {
+    let apiVersion: Int
+    let target: Int64
+    let now: Int64
+    let lead: Int
+    let force: Bool
+    let revealed: Bool
+    let fired: Bool
+    let screens: Int
+    let screen: ThemeAPIScreenV1
+}
 
 struct Options {
     var at: (h: Int, m: Int, s: Int)?
@@ -31,6 +54,13 @@ struct Options {
     var theme = ""
     var force = false           // 跳过时间窗和全屏判断，gong vis 预览走这条
     var invalid = false
+}
+
+/// Theme API 用 JavaScript number 表示 epoch 毫秒，必须留在安全整数范围内。
+func epochMilliseconds(_ seconds: Double) -> Int64? {
+    let milliseconds = seconds * 1000
+    guard milliseconds.isFinite, abs(milliseconds) <= maxJavaScriptSafeInteger else { return nil }
+    return Int64(milliseconds.rounded(.towardZero))
 }
 
 func parseArgs() -> Options {
@@ -67,7 +97,7 @@ func parseArgs() -> Options {
                 reportInvalid("invalid --at")
             }
         case "--target":
-            if let raw = next(), let epoch = Double(raw), epoch.isFinite {
+            if let raw = next(), let epoch = Double(raw), epochMilliseconds(epoch) != nil {
                 o.targetEpoch = epoch
             } else {
                 reportInvalid("invalid --target")
@@ -141,6 +171,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private var timers: [DispatchSourceTimer] = []
     private var opts = Options()
     private var revealed = false
+    private var fired = false
+    private var finished = false
+    private weak var primaryWeb: WKWebView?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         // .accessory = 无 Dock 图标、不接管菜单栏、启动时不激活
@@ -166,22 +199,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         // 先把 panel 建好、页面加载好，但【不 orderFront】——屏幕上什么都没有。
         // 等到 target - lead 才亮相，这样首帧是零延迟的，不会先闪一下白底。
         let screens = NSScreen.screens
+        guard !screens.isEmpty else { Darwin.exit(1) }
+        let mainScreen = NSScreen.main
+        let primaryIndex = mainScreen.flatMap { main in
+            screens.firstIndex(where: { $0 == main })
+        } ?? 0
         for (idx, screen) in screens.enumerated() {
             let (panel, web) = makePanel(on: screen, index: idx, total: screens.count,
+                                         isMain: mainScreen.map { $0 == screen } ?? false,
+                                         primary: idx == primaryIndex,
                                          html: html, target: target, now: now)
             panels.append(panel)
             webs.append(web)
+            if idx == primaryIndex { primaryWeb = web }
         }
 
         let revealAt = target.addingTimeInterval(-Double(opts.lead))
         after(max(revealAt.timeIntervalSince(now), 0)) { [weak self] in self?.reveal() }
 
         // 到点这一下也由壳来敲，主题不用自己盯着 target
-        after(max(target.timeIntervalSince(now), 0)) { [weak self] in
-            guard let self else { return }
-            self.eachLoadedWeb { $0.evaluateJavaScript(
-                "window.__gongFire && window.__gongFire(\(self.nowMillis()))", completionHandler: nil) }
-        }
+        after(max(target.timeIntervalSince(now), 0)) { [weak self] in self?.fire() }
 
         // 绝对兜底：无论上面哪一步卡住，进程都不会活过这个时间
         after(maxProcessSeconds) { NSApp.terminate(nil) }
@@ -247,7 +284,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         }
     }
 
+    /// fire 必须建立在 reveal 之后。页面若还没加载完，只记录全局状态，
+    /// didFinish 会为那一屏按 reveal → fire 的顺序补发。
+    private func fire() {
+        if !revealed { reveal() }
+        guard !fired else { return }
+        fired = true
+        for web in webs where loaded.contains(ObjectIdentifier(web)) { fireFire(web) }
+    }
+
     private func makePanel(on screen: NSScreen, index: Int, total: Int,
+                           isMain: Bool, primary: Bool,
                            html: URL, target: Date, now: Date) -> (OverlayPanel, WKWebView) {
         let panel = OverlayPanel(contentRect: screen.frame,
                                  styleMask: [.borderless, .nonactivatingPanel],
@@ -269,6 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         cfg.userContentController.add(self, name: "log")    // console.log / 未捕获异常 → stderr
         cfg.userContentController.addUserScript(
             WKUserScript(source: bootstrapJS(screen: screen, index: index, total: total,
+                                             isMain: isMain, primary: primary,
                                              target: target, now: now),
                          injectionTime: .atDocumentStart,
                          forMainFrameOnly: true))
@@ -291,69 +339,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     /// 刻意不注入 name/message 之类的内容参数——那会诱导主题去按定时名分支，
     /// 等于把表现逻辑漏回配置层。要不同的提醒形式就写不同的主题。
     private func bootstrapJS(screen: NSScreen, index: Int, total: Int,
+                             isMain: Bool, primary: Bool,
                              target: Date, now: Date) -> String {
-        // NSScreen.screens 的数组顺序不是主屏契约；只有在主屏不可用时才回退到 0 号。
-        let isPrimary = NSScreen.main == nil ? index == 0 : screen == NSScreen.main
-        let gong: [String: Any] = [
-            "target": (target.timeIntervalSince1970 * 1000).rounded(),
-            "now": (now.timeIntervalSince1970 * 1000).rounded(),
-            "lead": opts.lead,
-            "force": opts.force,
-            "revealed": false,
-            "fired": false,
-            "screens": total,
-            "screen": [
-                "index": index,
-                "isMain": screen == NSScreen.main,
-                "primary": isPrimary,
-                "w": screen.frame.width,
-                "h": screen.frame.height,
-                "scale": screen.backingScaleFactor,
-            ],
-        ]
-        let json = (try? JSONSerialization.data(withJSONObject: gong))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        guard let targetMillis = epochMilliseconds(target.timeIntervalSince1970),
+              let initialNowMillis = epochMilliseconds(now.timeIntervalSince1970)
+        else {
+            FileHandle.standardError.write(
+                "gong-overlay: Theme API time is outside the JavaScript safe integer range\n"
+                    .data(using: .utf8)!)
+            Darwin.exit(1)
+        }
+        let context = ThemeAPIContextV1(
+            apiVersion: themeAPIVersion,
+            target: targetMillis,
+            now: initialNowMillis,
+            lead: opts.lead,
+            force: opts.force,
+            revealed: false,
+            fired: false,
+            screens: total,
+            screen: ThemeAPIScreenV1(
+                index: index,
+                isMain: isMain,
+                primary: primary,
+                w: Double(screen.frame.width),
+                h: Double(screen.frame.height),
+                scale: Double(screen.backingScaleFactor)
+            )
+        )
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(context)
+        } catch {
+            FileHandle.standardError.write(
+                "gong-overlay: encode Theme API v1: \(error)\n".data(using: .utf8)!)
+            Darwin.exit(1)
+        }
+        guard let json = String(data: data, encoding: .utf8) else {
+            FileHandle.standardError.write(
+                "gong-overlay: encode Theme API v1: invalid UTF-8\n".data(using: .utf8)!)
+            Darwin.exit(1)
+        }
 
         return """
         (function () {
-          window.gong = \(json);
-          // 壳在 target - lead 那一刻调这个。CSS 动画要挂在 html.gong-live 下面，
-          // 因为页面是提前加载好的，按 load 起算会跑偏。
-          // 注意所有回调都先刷新 gong.now 再调主题。
-          // gong.now 是注入时写死的启动时刻，而页面是提前加载好的——
-          // 亮相可能发生在启动后 60 秒，那时候还拿 gong.now 当「现在」会差整整一个等待期。
-          window.__gongReveal = function (ms) {
-            if (window.gong.revealed) return;
-            window.gong.now = ms || Date.now();
-            window.gong.revealed = true;
-            document.documentElement.classList.add('gong-live');
-            try { window.gong.onReveal && window.gong.onReveal(); } catch (e) {}
-          };
+          var gong = \(json);
+          // v1 的回调槽始终存在；null 表示主题不关心这个事件。
+          gong.onReveal = null;
+          gong.onTick = null;
+          gong.onFire = null;
 
-          // 壳每 100ms 喂一次当前时间；主题要计时就用它，别自己起定时器。
-          window.__gongTick = function (ms) {
-            window.gong.now = ms;
-            try { window.gong.onTick && window.gong.onTick(ms); } catch (e) {}
-          };
-
-          // 到点。壳按 target 精确敲这一下，主题不用自己盯着倒数。
-          window.__gongFire = function (ms) {
-            if (window.gong.fired) return;
-            window.gong.now = ms || Date.now();
-            window.gong.fired = true;
-            document.documentElement.classList.add('gong-fired');
-            try { window.gong.onFire && window.gong.onFire(); } catch (e) {}
-          };
-          // 主题契约：动画结束必须喊这一声，壳才会退出。没喊到的话有兜底超时。
-          // 多屏时每块屏是一个互不知情的 WebView 实例，任何一个喊 done 都会带走整个进程，
-          // 所以只认主屏那一份。
-          window.gong.done = function () {
-            if (!window.gong.screen.primary) return;
-            window.webkit.messageHandlers.done.postMessage(1);
-          };
-
-          // 主题跑在一个没有开发者工具的 WebView 里，出错会静悄悄地什么都不发生。
-          // 把 console 和未捕获异常引到壳的 stderr，写主题时用 --force 就能看见。
           var send = function (kind, text) {
             try { window.webkit.messageHandlers.log.postMessage(kind + ' ' + text); } catch (e) {}
           };
@@ -364,17 +399,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
               orig.apply(console, arguments);
             };
           });
+
+          var reports = Object.create(null);
+          var describe = function (error) {
+            return error && (error.stack || error.message) || String(error);
+          };
+          var report = function (scope, error) {
+            var text = scope + ': ' + describe(error);
+            var now = Date.now();
+            var previous = reports[scope];
+            if (previous && (previous.text === text || now - previous.at < 1000)) return;
+            reports[scope] = {text: text, at: now};
+            send('error', text);
+          };
+          var invoke = function (name, args) {
+            var callback = gong[name];
+            if (callback == null) return;
+            if (typeof callback !== 'function') {
+              report('gong.' + name, new TypeError('expected function or null'));
+              return;
+            }
+            try {
+              var result = callback.apply(gong, args || []);
+              if (result && typeof result.then === 'function') {
+                Promise.resolve(result).catch(function (error) {
+                  report('gong.' + name, error);
+                });
+              }
+            } catch (error) {
+              report('gong.' + name, error);
+            }
+          };
+          var normalizeMillis = function (ms) {
+            if (typeof ms !== 'number' || !Number.isFinite(ms)) return Date.now();
+            var value = Math.trunc(ms);
+            return Number.isSafeInteger(value) ? value : Date.now();
+          };
+
+          var doneSent = false;
+          gong.done = function () {
+            if (doneSent || !gong.screen.primary) return;
+            try {
+              window.webkit.messageHandlers.done.postMessage(1);
+              doneSent = true;
+            } catch (error) {
+              report('gong.done', error);
+            }
+          };
+          Object.defineProperty(gong, 'apiVersion', {
+            value: gong.apiVersion, writable: false, enumerable: true, configurable: false
+          });
+          Object.defineProperty(window, 'gong', {
+            value: gong, writable: false, enumerable: true, configurable: false
+          });
+
+          // 私有状态才是宿主幂等依据；公开字段只是给主题读取的状态镜像。
+          var didReveal = false;
+          var didFire = false;
+
+          // 壳在 target - lead 附近亮相；晚加载时会在 didFinish 立即补发。
+          window.__gongReveal = function (ms) {
+            if (didReveal) return;
+            didReveal = true;
+            gong.now = normalizeMillis(ms);
+            gong.revealed = true;
+            document.documentElement.classList.add('gong-live');
+            invoke('onReveal');
+          };
+
+          // 心跳约每 100ms 到一次，允许跳帧；主题必须用 now 的绝对差值计时。
+          window.__gongTick = function (ms) {
+            if (!didReveal) return;
+            gong.now = normalizeMillis(ms);
+            invoke('onTick', [gong.now]);
+          };
+
+          // fire 永远建立在 reveal 之后；晚加载时同样按这个顺序回放。
+          window.__gongFire = function (ms) {
+            if (!didReveal) window.__gongReveal(ms);
+            if (didFire) return;
+            didFire = true;
+            gong.now = normalizeMillis(ms);
+            gong.fired = true;
+            document.documentElement.classList.add('gong-fired');
+            invoke('onFire');
+          };
+
           window.addEventListener('error', function (e) {
-            send('error', (e.message || 'error') + ' @' + (e.lineno || '?'));
+            var location = (e.filename || '?') + ':' + (e.lineno || '?') + ':' + (e.colno || '?');
+            report('window.error', e.error || ((e.message || 'error') + ' @' + location));
+          });
+          window.addEventListener('unhandledrejection', function (e) {
+            report('unhandledrejection', e.reason);
           });
         })();
         """
     }
 
-    private func nowMillis() -> Int { Int(Date().timeIntervalSince1970 * 1000) }
+    private func nowMillis() -> Int64 {
+        guard let value = epochMilliseconds(Date().timeIntervalSince1970) else { Darwin.exit(1) }
+        return value
+    }
 
     private func fireReveal(_ web: WKWebView) {
         web.evaluateJavaScript("window.__gongReveal && window.__gongReveal(\(nowMillis()))",
+                               completionHandler: nil)
+    }
+
+    private func fireFire(_ web: WKWebView) {
+        web.evaluateJavaScript("window.__gongFire && window.__gongFire(\(nowMillis()))",
                                completionHandler: nil)
     }
 
@@ -382,7 +515,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     /// 那会儿 __gongReveal 还不存在，喊了也白喊。所以两边都要触发一次。
     func webView(_ web: WKWebView, didFinish navigation: WKNavigation!) {
         loaded.insert(ObjectIdentifier(web))
-        if revealed { fireReveal(web) }
+        if fired {
+            fireFire(web) // JS 入口会先补 reveal
+        } else if revealed {
+            fireReveal(web)
+        }
     }
 
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
@@ -391,6 +528,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             FileHandle.standardError.write("gong-overlay\(tag)[js] \(m.body)\n".data(using: .utf8)!)
             return
         }
+        guard !finished, m.frameInfo.isMainFrame,
+              let source = m.webView, source === primaryWeb else { return }
+        finished = true
+        for timer in timers { timer.cancel() }
         NSApp.terminate(nil)
     }
 

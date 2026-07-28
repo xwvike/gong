@@ -44,21 +44,36 @@ gong themes         # 列出可用主题
 
 ## 主题
 
-主题就是一个目录，`index.html` + `theme.toml`。放进 `~/.config/gong/themes/<name>/` 就能用，同名会盖住内置的。
+标准主题就是一个目录：`index.html` 负责表现，`theme.toml` 负责给 Go 提供元数据。放进 `~/.config/gong/themes/<name>/` 就能用，同名会盖住内置主题；旧主题可以省略 `theme.toml` 并使用默认元数据。
 
 ```toml
+name      = "白炽灯丝"
+desc      = "六位钨丝时钟由暗红升至暖白，到点后留下冷却余辉。"
 lead      = 5        # 提前多少秒亮相（launchd 只有分钟精度，剩下的由壳自己等）
-duration  = 10       # 预期可见时长
-placement = "center" # center / edge / corner
+duration  = 10       # 从实际亮相到视觉预计结束的总秒数
+placement = "center" # center / edge / corner，目前只用于遮挡范围提示
+webgl     = true     # 仅声明主题会自行尝试 WebGL；上下文及降级由主题自己负责
 ```
 
-页面里能拿到 `window.gong`：
+外壳会在 `.atDocumentStart` 注入固定的 **Theme API v1**。下面这些字段和回调槽始终存在；完整类型、单位、不变量、生命周期和兼容规则见 [Theme API v1](doc.md#theme-api-v1)。
 
 ```js
-window.gong.onReveal = () => { /* 壳亮相了，动画从这里起跑 */ };
-window.gong.onFire   = () => { /* 到点了 */ };
-window.gong.onTick   = (now) => { /* 壳每 100ms 喂一次时间 */ };
-window.gong.done();                     // 放完了，通知壳退出
+// 宿主注入的固定形状（示意）；主题不要执行这段赋值或替换 window.gong。
+window.gong = {
+  apiVersion: 1,
+  target: 1753588800000, now: 1753588795012, lead: 5, force: false,
+  revealed: false, fired: false, screens: 1,
+  screen: {index: 0, isMain: true, primary: true, w: 1512, h: 982, scale: 2},
+  onReveal: null, onTick: null, onFire: null,
+  done() {}
+};
+
+const g = window.gong;
+g.onReveal = () => { /* 壳亮相后开始表现 */ };
+g.onTick = now => { /* 用绝对时间差推进，不要数心跳 */ };
+g.onFire = () => { /* 到达目标时刻，或迟到后立即补发 */ };
+// 退场动画完成后再调用；定义函数不会让主题加载时立即退出：
+const finish = () => g.done();
 ```
 
 多屏主题可用 `window.gong.screen.primary` 判断当前实例是不是主屏；不要假设 `screen.index === 0` 一定是主屏。
@@ -66,10 +81,12 @@ window.gong.done();                     // 放完了，通知壳退出
 三条要紧的：
 
 1. **动画挂在 `html.gong-live` 下面**。页面是被提前加载好的，按 `load` 起算会跑偏。到点后还会多一个 `html.gong-fired`，纯 CSS 主题可以一行 JS 都不写。
-2. **别用 `setTimeout` / `setInterval` / `requestAnimationFrame` 卡点**，用 `onTick` / `onFire`。页面里的定时器在重绘压力下会被拖到几秒甚至不来，壳这边误差只有几毫秒。
+2. **别用 `setTimeout` / `setInterval` / `requestAnimationFrame` 当时钟或退出闸门**，用 `onTick(now)` 的绝对时间和 `onFire`。`requestAnimationFrame` 可以画帧，但不能决定是否到点。
 3. **常驻 CSS 动画别挂在带 `filter` 的元素上**，挂容器上。前者会把主线程压死。
 
-调试直接 `gong vis <theme>`——预览和真实触发走完全同一条渲染路径。主题里的 `console.log` 和未捕获异常会打到 stderr。
+Go 只读取 `theme.toml`、计算调度参数并启动 Swift 外壳；Swift 再把时间和屏幕快照组装成上面的固定对象。HTML 不会直接收到 TOML、定时名称或提醒文案，`webgl = true` 也不会替页面创建 WebGL 上下文。
+
+调试直接 `gong vis <theme>`——预览和真实触发走完全同一条渲染路径。主题的 console、同步回调异常和未处理的 Promise rejection 都会打到 stderr。纯 CSS 主题可以不注册回调，但只能等外壳 timeout 退出；需要精确收尾就由主屏调用 `done()`。
 
 ## 为什么不是别的
 

@@ -1,6 +1,9 @@
 package theme
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestResolveRejectsPathTraversal(t *testing.T) {
 	for _, id := range []string{"", ".", "..", "../default", "nested/theme"} {
@@ -17,6 +20,29 @@ func TestThemeLimits(t *testing.T) {
 	if got := th.LeadSeconds(); got != MaxLead {
 		t.Errorf("LeadSeconds() = %d, want %d", got, MaxLead)
 	}
+	if got := th.TimeoutSeconds(); got != MaxVisible {
+		t.Errorf("TimeoutSeconds() = %d, want %d", got, MaxVisible)
+	}
+}
+
+func TestLegacyThemeMetadataDefaults(t *testing.T) {
+	th := Theme{ID: "legacy"}
+	if got := th.Label(); got != "legacy" {
+		t.Errorf("Label() = %q, want legacy", got)
+	}
+	if got := th.LeadSeconds(); got != 0 {
+		t.Errorf("LeadSeconds() = %d, want 0", got)
+	}
+	if got := th.TimeoutSeconds(); got != 20 {
+		t.Errorf("TimeoutSeconds() = %d, want 20", got)
+	}
+	if th.Meta.Desc != "" || th.Meta.Placement != "" || th.Meta.WebGL {
+		t.Fatalf("legacy metadata defaults changed: %+v", th.Meta)
+	}
+}
+
+func TestThemeTimeoutSaturatesBeforeIntegerOverflow(t *testing.T) {
+	th := Theme{Meta: Meta{Duration: math.MaxInt}}
 	if got := th.TimeoutSeconds(); got != MaxVisible {
 		t.Errorf("TimeoutSeconds() = %d, want %d", got, MaxVisible)
 	}
