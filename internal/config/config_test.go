@@ -173,7 +173,7 @@ func TestLoadIgnoresLegacyNameField(t *testing.T) {
 name = "noon"
 at = "12:00:00"
 weekdays = [1, 2, 3, 4, 5]
-theme = "nixie"
+theme = "default"
 enabled = true
 grace = 1200
 `

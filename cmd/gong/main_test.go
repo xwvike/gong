@@ -12,7 +12,7 @@ import (
 
 func TestOverlayArgsCarryAbsoluteTarget(t *testing.T) {
 	s := config.Schedule{Label: "mid", At: "00:00:02", Grace: 1200}
-	th := theme.Theme{HTML: "/tmp/themes/nixie/index.html", Meta: theme.Meta{Lead: 5, Duration: 10}}
+	th := theme.Theme{HTML: "/tmp/themes/fake/index.html", Meta: theme.Meta{Lead: 5, Duration: 10}}
 	target := time.Date(2026, 7, 27, 0, 0, 2, 0, time.FixedZone("test", 8*60*60))
 
 	args := overlayArgs("/tmp/gong-overlay", s, th, target, "#1")

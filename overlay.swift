@@ -1,7 +1,7 @@
 // gong-overlay — 到点在所有屏幕最顶层播一段 HTML 动画，不抢焦点、不吃点击，播完自杀。
 // 编译： swiftc -O overlay.swift -o gong-overlay
-// 运行： ./gong-overlay --at 12:00:00 --lead 5 --theme ~/.config/gong/themes/nixie/index.html
-//        ./gong-overlay --force --theme ./themes/nixie/index.html      # 预览
+// 运行： ./gong-overlay --at 12:00:00 --lead 0 --theme ~/.config/gong/themes/default/index.html
+//        ./gong-overlay --force --theme ./themes/default/index.html      # 预览
 //
 // 这个壳是无状态的：不读配置文件、不认识主题名、不知道有几条定时。
 // 传进来的 flag 全是【什么时候】和【活多久】，没有一个是【长什么样】——

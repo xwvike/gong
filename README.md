@@ -37,7 +37,7 @@ gong uninstall
 ```bash
 gong set            # TUI：增删改查定时、换主题、预览
 gong ls             # 看看现在有哪些定时，以及是不是真的接管了
-gong vis nixie      # 预览一个主题
+gong vis default    # 预览一个主题
 gong stop           # 掐掉正在播的浮层
 gong themes         # 列出可用主题
 ```
@@ -101,7 +101,7 @@ Go 只读取 `theme.toml`、计算调度参数并启动 Swift 外壳；Swift 再
 ```bash
 swiftc -O overlay.swift -o gong-overlay
 go build -o gong ./cmd/gong
-./gong vis nixie
+./gong vis default
 ```
 
 需要 Xcode Command Line Tools（`swiftc` 在里面，不需要完整 Xcode）和 Go。走 brew 装的话这两个都不用。

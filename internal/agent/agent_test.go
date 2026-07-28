@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -111,10 +112,32 @@ func TestMatchNoneEnabled(t *testing.T) {
 	}
 }
 
+// withLeadTheme 在临时 HOME 下放一个只带 lead 值的假主题，
+// 让跨午夜这类测试不用绑死仓库里恰好有哪个真主题——
+// 之前这里直接写死 "nixie"，nixie 被删掉的时候这两个测试也跟着断了，
+// 测试本该测的是反查算法，不该因为换了套主题就要跟着改。
+func withLeadTheme(t *testing.T, lead int) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "gong", "themes", "faketheme")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := fmt.Sprintf("lead = %d\n", lead)
+	if err := os.WriteFile(filepath.Join(dir, "theme.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return "faketheme"
+}
+
 // 周日午夜前触发的定时，星期已经被移到周六，反查时也得对得上
 func TestMatchAcrossMidnight(t *testing.T) {
 	s := sched("mid", "00:00:02", []int{1})
-	s.Theme = "nixie" // lead=5：周一目标会在周日 23:59 被拉起
+	s.Theme = withLeadTheme(t, 5) // lead=5：周一目标会在周日 23:59 被拉起
 	c := &config.Config{Schedules: []config.Schedule{s}}
 	// 触发点在周日，反查结果仍必须指向周一的目标日期。
 	now := time.Date(2026, 7, 26, 23, 59, 0, 0, time.Local)
@@ -136,7 +159,7 @@ func TestMatchAcrossMidnight(t *testing.T) {
 
 func TestTargetForUsesNearestAbsoluteDate(t *testing.T) {
 	s := sched("mid", "00:00:02", []int{1})
-	s.Theme = "nixie"
+	s.Theme = withLeadTheme(t, 5)
 	now := time.Date(2026, 7, 26, 23, 59, 10, 0, time.Local)
 	want := time.Date(2026, 7, 27, 0, 0, 2, 0, time.Local)
 	if got := TargetFor(s, now); !got.Equal(want) {

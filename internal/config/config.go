@@ -41,7 +41,7 @@ func Default() *Config {
 		Version: 1,
 		Schedules: []Schedule{
 			{Label: "午间", At: "12:00:00", Weekdays: []int{1, 2, 3, 4, 5},
-				Theme: "nixie", Enabled: true, Grace: DefaultGrace},
+				Theme: "default", Enabled: true, Grace: DefaultGrace},
 			{Label: "下班", At: "18:00:00", Weekdays: []int{1, 2, 3, 4, 5},
 				Theme: "default", Enabled: true, Grace: DefaultGrace},
 		},

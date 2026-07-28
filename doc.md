@@ -16,7 +16,7 @@ Swift 壳已重构完成并实测通过，两个主题跑通了完整契约。**
 | 延迟亮相（lead） | ✅ 已验证 |
 | 到点精度 | 页面已加载且系统未休眠时，壳按 target 敲，实测误差 <10ms；迟到或晚加载走补发语义 |
 | 可见 60s 闸门 | ✅ 已验证，失控主题实测 60.17s 被砍 |
-| 稳定性 | nixie（白炽灯丝）连跑 8 次 6.61s（首次冷启 7.17s）；default 连跑 4 次 5.50s |
+| 稳定性 | default（LED 信号板）连跑 3 次 7.25s / 7.25s / 7.26s |
 | 多显示器 | ⚠️ 未验证（无外接屏），代码是每块屏建一个 panel |
 | 环境 | macOS 26.5.2 / Apple silicon / Swift 6.3.3 |
 
@@ -300,7 +300,7 @@ internal/tui           gong set
 ```
 gong-overlay --at 12:00:00 --target 1753588800 --lead 5 --grace 1200 --timeout 20 \
              --name noon \
-             --theme ~/.config/gong/themes/nixie/index.html
+             --theme ~/.config/gong/themes/default/index.html
 ```
 
 `--target` 是这次触发对应的 Unix 秒，优先于只按当天解析的兼容参数 `--at`；Swift 转成 Theme API 时再变为 Unix 毫秒。
@@ -525,7 +525,7 @@ fire timer 与 heartbeat timer 相互独立，因此边界上不承诺 `onFire()
 ## 八、任务清单（建议顺序）
 
 - [x] Swift 壳重构：flag 解析、延迟亮相、`window.gong` 注入、非对称时间窗、全屏复检、双闸门、日志桥、心跳
-- [x] 两个主题跑通契约：`default`（闸门）、`nixie`（白炽灯丝）
+- [x] 主题跑通契约：`default`（闸门 → 白炽灯丝 → 现在的 LED 信号板，见下面「主题两次推翻」）
 - [x] Go CLI：`on/off/set/ls/rm/vis/stop/fire/themes`，配置、主题解析、plist 生成、launchctl 接管
 - [x] Bubble Tea TUI：增删改查、启停、换主题、预览
 - [x] CI 预编译 universal binary + Homebrew formula
@@ -569,8 +569,7 @@ tap 用的是**已有的** `xwvike/homebrew-tap`（brew 里叫 `xwvike/tap`）�
 
 ```
 overlay.swift          Swift 壳
-themes/default/        闸门主题（原 index.html）
-themes/nixie/          白炽灯丝主题
+themes/default/        LED 信号板主题（第三版内容，见下面「主题两次推翻」）
 ```
 
 编译与自测：
@@ -579,10 +578,17 @@ themes/nixie/          白炽灯丝主题
 swiftc -O overlay.swift -o gong-overlay
 
 ./gong-overlay --force --theme themes/default/index.html
-./gong-overlay --force --lead 5 --theme themes/nixie/index.html
-./gong-overlay --at 12:00:00 --lead 5 --grace 1200 --timeout 20 \
-               --name noon --theme themes/nixie/index.html
+./gong-overlay --at 12:00:00 --lead 0 --grace 1200 --timeout 20 \
+               --name noon --theme themes/default/index.html
 ```
+
+### 主题两次推翻，`nixie` 已删除
+
+`default` 目录下的内容前后换过三版：最早是闸门（上下两道压边），然后是 `nixie` 白炽灯丝（当时是独立主题，用来验证 Theme API 契约够不够用），现在是移植自用户提供的 React/Canvas 组件的 LED 点阵信号板——原型阶段的两个主题都被判定"太朴素，没人会想用"，整个删掉重做，不是迭代。
+
+`nixie` 目录已经从仓库删除。**它当时验证 Theme API 契约的价值没有消失**——多屏单实例、`screen.primary`、时间归壳这些设计决策都是靠它撞出来的，具体教训还留在本文档的相应小节里（搜"filter 动画把主线程压死"能找到）；删掉的只是那份代码，不是那些教训。
+
+`internal/config/config.go` 的 `Default()` 原来给"午间"那条配了 `nixie`，`nixie` 一删这条默认配置就会在 `gong on` 时报"主题找不到"——已经改成两条默认定时都指 `default`。`internal/agent/agent_test.go` 里两个依赖"某个主题 lead=5"的跨午夜测试，原来抄近路直接写死 `s.Theme = "nixie"`（依赖仓库里恰好有这么一个主题，测试跟具体主题耦合，这次改的时候才发现这个问题），换成了测试自建的临时主题目录，不再依赖仓库里现存哪些主题。
 
 这里的 `--at` 是兼容旧调用方的“按当天解析”参数；生产调度应同时传本次目标的 `--target <Unix 秒>`。`--force` 跳过时间窗和全屏判断，是 `gong vis` 的雏形。主题里的 `console.log` 和未捕获异常会打到 stderr，前缀 `gong-overlay[js]`。
 
