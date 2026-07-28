@@ -14,9 +14,9 @@ Swift 壳已重构完成并实测通过，两个主题跑通了完整契约。**
 | 出现 / 背景真透明 | ✅ 已验证 |
 | 不夺焦点 / 点击穿透 | ✅ 已验证（浮层前后 `lsappinfo front` 不变） |
 | 延迟亮相（lead） | ✅ 已验证 |
-| 到点精度 | 壳按 target 敲，误差 <10ms |
+| 到点精度 | 页面已加载且系统未休眠时，壳按 target 敲，实测误差 <10ms；迟到或晚加载走补发语义 |
 | 可见 60s 闸门 | ✅ 已验证，失控主题实测 60.17s 被砍 |
-| 稳定性 | nixie 连跑 8 次 6.61s（首次冷启 7.17s）；default 连跑 4 次 5.50s |
+| 稳定性 | nixie（白炽灯丝）连跑 8 次 6.61s（首次冷启 7.17s）；default 连跑 4 次 5.50s |
 | 多显示器 | ⚠️ 未验证（无外接屏），代码是每块屏建一个 panel |
 | 环境 | macOS 26.5.2 / Apple silicon / Swift 6.3.3 |
 
@@ -34,13 +34,13 @@ release sha256 独立复核一致 → brew 装完 **没有 com.apple.quarantine*
 
 | 层 | 管什么 | 不管什么 |
 |---|---|---|
-| **壳** `gong-overlay` | 计时、拉起主题、**给主题提供能力**（暗亮模式、将来主题反过来跟壳通信） | 不读配置、不认识主题名、不知道有几条定时 |
-| **Go** `gong` | 配置、TUI、launchd 接管 | 不参与渲染 |
-| **主题** | 表现形式和文案 | 不做计时、不读参数 |
+| **壳** `gong-overlay` | 原生窗口、计时、屏幕快照、Theme API v1、`done`/日志桥 | 不读配置、不认识主题目录 ID、不知道有几条定时 |
+| **Go** `gong` | 配置、TUI、主题元数据、调度参数、launchd 接管 | 不参与渲染、不直接注入 HTML |
+| **主题** | 表现形式和文案，按宿主绝对时间推进视觉 | 不读 Go 配置、不改宿主状态、不自行调度目标时刻 |
 
 主题是**最重要也是能力最弱**的一层：它的表现力应该在设计上，不在程序上。所以壳给它的东西越少越好，凡是主题要自己写逻辑才能做到的事，都该考虑是不是壳该直接给。
 
-「主题 → 壳」这条反向通道已经有雏形了：`done` 和 `log` 两个 messageHandler。将来加能力（暗亮模式、拿系统状态）就是往这条道上挂东西，不要另起炉灶。
+「主题 → 壳」这条反向通道已经固定为 `done` 和内部日志桥。将来若要加入暗亮模式或系统状态，必须按 Theme API 的版本规则发布新契约，不能直接给 v1 偷加字段。
 
 ## 二、硬约束（不能破坏）
 
@@ -74,16 +74,16 @@ release sha256 独立复核一致 → brew 装完 **没有 com.apple.quarantine*
 - **时间窗判断不能删** —— launchd 的 `StartCalendarInterval` 在错过的时间点会在唤醒后补跑一次，没这个判断的话晚上十点开电脑会被祝贺下班。
 - **窗口是非对称的** —— `[target - lead - 90s, target + grace]`。因为 launchd 只有分钟精度，lead=5 的定时实际是提前最多 60 秒被拉起来的。对称的 `abs()` 判断会把倒计时类主题全毙掉。
 - **闸门必须用 `DispatchSourceTimer`，不能用 `asyncAfter`** —— 后者的 leeway 跟间隔成正比，实测 60 秒的闸门会飘到 63.17 秒。换成显式 `leeway: .milliseconds(50)` 后是 60.23 秒。闸门是给用户兜底的，不能由系统看着办。
-- **reveal 和页面加载完成有竞态** —— lead=0 时 reveal 几乎立刻发生，那会儿注入的 `__gongReveal` 还不存在，`evaluateJavaScript` 喊了等于没喊，主题永远不启动、永远不喊 done，只能等兜底超时。所以 `reveal()` 和 `didFinish` 两边都要触发一次，靠 `revealed` 标志去重。**这个 bug 第一次实测就撞上了。**
+- **reveal 和页面加载完成有竞态** —— lead=0 时 reveal 几乎立刻发生，那会儿注入的 `__gongReveal` 还不存在，`evaluateJavaScript` 喊了等于没喊，主题永远不启动、永远不喊 done，只能等兜底超时。所以 `reveal()` 和 `didFinish` 两边都要触发一次，靠宿主状态和文档内私有 `didReveal` 标志去重。**这个 bug 第一次实测就撞上了。**
 - **`gong.now` 每次回调前必须刷新** —— 它是注入时写死的启动时刻，而页面是**提前加载**的。亮相可能发生在启动后 60 秒，主题在 `onReveal` 里拿 `gong.now` 当「现在」会差整整一个等待期。default 主题因此在真实路径下一亮相就判定「动画放完了」，立刻退出。
-  所以 `__gongReveal(ms)` / `__gongFire(ms)` / `__gongTick(ms)` **都带时间戳**，进函数先写 `gong.now`。
+  所以私有桥接函数 `__gongReveal(ms)` / `__gongFire(ms)` / `__gongTick(ms)` **都带时间戳**，进函数先写 `gong.now`；公开回调仍固定为无参 `onReveal()`、无参 `onFire()` 和单参数 `onTick(now)`。
   **这个 bug `--force` 测不出来**——force 的等待期是 0，误差正好为 0。教训：回归里必须有走 `--at` 的真实路径用例。
 
 ### 主题渲染（新踩的坑，最坑的一个）
 
 **常驻 CSS 动画挂在带 `filter` 的元素上会把主线程压死，进而拖垮 JS 定时器。**
 
-nixie 主题最初给 6 个带三层 `drop-shadow` 的数字各挂了一个 `opacity` 闪烁动画。实测：
+旧版 nixie 辉光效果最初给 6 个带三层 `drop-shadow` 的数字各挂了一个 `opacity` 闪烁动画。实测：
 
 | 配置 | 一个 2600ms 的 `setTimeout` 实际什么时候来 |
 |---|---|
@@ -254,10 +254,12 @@ internal/tui           gong set
 所有配置逻辑留在 Go，**Swift 壳保持无状态、不读任何配置文件**。Go 读主题的 `theme.toml`，把参数全部内联成 flag：
 
 ```
-gong-overlay --at 12:00:00 --lead 5 --grace 1200 --timeout 20 \
+gong-overlay --at 12:00:00 --target 1753588800 --lead 5 --grace 1200 --timeout 20 \
              --name noon \
              --theme ~/.config/gong/themes/nixie/index.html
 ```
+
+`--target` 是这次触发对应的 Unix 秒，优先于只按当天解析的兼容参数 `--at`；Swift 转成 Theme API 时再变为 Unix 毫秒。
 
 **传进去的 flag 全是「什么时候」和「活多久」，没有一个是「长什么样」。**
 
@@ -276,13 +278,13 @@ gong-overlay --at 12:00:00 --lead 5 --grace 1200 --timeout 20 \
 11:59:00.3   时间窗判断通过，建 panel + 加载 WebView，【不 orderFront】——屏幕上什么都没有
              ... 静躺 55 秒，几乎零 CPU ...
 11:59:55.0   orderFront，页面瞬间可见（已经加载好了，首帧零延迟）
-12:00:00.0   window.gong.target 到点，主题自己动作
+12:00:00.0   外壳置 fired、添加 gong-fired，并调用主题的 onFire()
 12:00:04.0   主题喊 done，进程退出
 ```
 
 「提前加载、延后亮相」是白赚的：WebView 那 200ms 加载和首帧编译在等待期就做完了，不会先闪一下白底。
 
-**lead 是主题的属性，不是定时的属性。** 用户在 TUI 里设的是「12:00」，他不该知道辉光管需要提前 5 秒。换个主题，plist 自动重算。
+**lead 是主题的属性，不是定时的属性。** 用户在 TUI 里设的是「12:00」，他不该知道白炽灯丝主题需要提前 5 秒。换个主题，plist 自动重算。
 
 **已知边界情况**：11:59:30 合盖，进程被挂起，12:00 那一刻没发生；醒来后 launchd 也不会补跑，因为 11:59:00 那个触发点它已经跑过了。这一次提醒就是丢了。lead 越小窗口越窄，所以**约定 lead 上限 60 秒**（壳里 clamp 了）。
 
@@ -302,44 +304,158 @@ gong-overlay --at 12:00:00 --lead 5 --grace 1200 --timeout 20 \
 `theme.toml`：
 
 ```toml
-name      = "辉光管"
-desc      = "六管辉光管时钟悬在屏幕正中，只留灯丝。"
+name      = "白炽灯丝"
+desc      = "六位钨丝时钟由暗红升至暖白，到点后留下冷却余辉。"
 lead      = 5        # 提前多少秒亮相
-duration  = 10       # 预期可见时长（秒），Go 拿它算 --timeout
+duration  = 10       # 从实际亮相到视觉预计结束的总秒数，包含 lead
 placement = "center" # center / edge / corner，给 TUI 提示会不会挡住视线
-webgl     = false
+webgl     = true      # 仅声明主题会自行尝试 WebGL；Go/外壳不据此改变行为
 ```
 
-### 主题契约：window.gong
+`name`、`desc`、`lead`、`duration` 和 `placement` 由 Go 读取；`webgl` 当前只是声明性元数据，没有运行时消费者。无论真假，它都不会允许、禁止或替主题开启 WebGL，也不会传进 `window.gong`。`duration` 表示从 reveal 到视觉预计结束（以及主动主题通常调用 `done()`）的总秒数，纯 CSS 主题也照此填写；它不传给主题。Go 将外壳兜底时间算成 `min(duration + 10, 60)` 秒，并从实际亮相时刻开始计时。只有 `lead` 会同时参与调度并出现在 Theme API 中。
 
-壳用 `WKUserScript` 在 `.atDocumentStart` 注入。**壳只给「时间」和「几何」，其余全归主题。**
+`theme.toml` 可以省略；TOML 语法和已知字段类型仍须能被 Go 解析，但当前不校验必填字段、`placement` 枚举或未知键。缺省时展示名回退到目录 ID，`desc`/`placement` 为空、`lead = 0`、`webgl = false`；`duration <= 0` 按 10 秒计算。Go 会把 `lead` 钳在 `0..60`，最终 timeout 不超过 60 秒。
 
-```js
-window.gong = {
-  target:  1753588800000,    // 目标时刻绝对毫秒
-  now:     1753588795012,    // 壳那边的当前时间，每次心跳刷新
-  lead:    5,
-  force:   false,
-  revealed: false,
-  fired:    false,
-  screens: 1,
-  screen:  { index: 0, isMain: true, primary: true, w: 1512, h: 982, scale: 2 },
+三层之间的数据边界是固定的：
 
-  onReveal: undefined,       // 壳亮相时调（target - lead）
-  onTick:   undefined,       // 壳每 100ms 调一次，参数是当前毫秒
-  onFire:   undefined,       // 壳在 target 那一刻精确调一次
-  done:     function () {}   // 主题调它通知壳退出
+| 层 | 输入 | 输出 / 对下一层的影响 |
+|---|---|---|
+| Go CLI | 定时配置、主题目录、`theme.toml` | 计算目标时刻、`lead` 和 timeout，以参数启动 Swift；传入 HTML 文件路径 |
+| Swift 外壳 | Go 的启动参数、`NSScreen` 快照、系统时间 | 注入 Theme API v1，维护生命周期状态和两个 DOM class，接收 `done()` |
+| HTML 主题 | 固定的 `window.gong`、`html.gong-live`、`html.gong-fired` | 只负责视觉和退场；不能反向读取 Go 配置，也不修改宿主状态 |
+
+### Theme API v1
+
+`window.gong` 是外壳与主题之间唯一的公开 **JavaScript** 运行时接口；`html.gong-live` 和 `html.gong-fired` 是另外两个由宿主维护的生命周期信号。壳用 `WKUserScript` 在主文档的 `.atDocumentStart` 一次性注入完整对象；主题不直接读取 Go 配置，也拿不到定时名、文案、`grace`、`duration` 或 launchd 信息。
+
+下面的类型定义就是 **v1 固定模板**。根字段、`screen` 子字段、名称、类型、单位和回调签名都属于契约：
+
+```ts
+type EpochMilliseconds = number; // Unix 毫秒，且是 JavaScript 安全整数
+
+interface GongThemeScreenV1 {
+  readonly index: number;
+  readonly isMain: boolean;
+  readonly primary: boolean;
+  readonly w: number;
+  readonly h: number;
+  readonly scale: number;
+}
+
+interface GongThemeAPIV1 {
+  readonly apiVersion: 1;
+  readonly target: EpochMilliseconds;
+  readonly now: EpochMilliseconds;
+  readonly lead: number;
+  readonly force: boolean;
+  readonly revealed: boolean;
+  readonly fired: boolean;
+  readonly screens: number;
+  readonly screen: GongThemeScreenV1;
+
+  onReveal: (() => void) | null;
+  onTick: ((now: EpochMilliseconds) => void) | null;
+  onFire: (() => void) | null;
+  done(): void;
 }
 ```
 
-对应地 `<html>` 上会依次出现 `gong-live`（亮相）和 `gong-fired`（到点）两个 class，纯 CSS 主题可以什么 JS 都不写。
+数据字段：
 
-五条规矩：
+| 字段 | 类型与单位 | 固定语义 |
+|---|---|---|
+| `apiVersion` | 整数，恒为 `1` | Theme API 主版本，不跟 gong 的发布版本走 |
+| `target` | Unix epoch 毫秒安全整数 | 本次计划目标时刻；同一进程、所有屏幕完全相同且不会改变 |
+| `now` | Unix epoch 毫秒安全整数 | 外壳的实际投递时刻；每次公开回调前先刷新，系统校时可能让它回退 |
+| `lead` | 整数秒，`0..60` | 计划亮相时刻为 `target - lead * 1000`；迟到时立即亮相，不修改 `target` |
+| `force` | boolean | `gong vis` 预览为 `true`；只跳过时间窗和全屏抑制，其他生命周期不变。未显式给目标时刻时，外壳合成 `target = 启动时刻 + lead` |
+| `revealed` | boolean | 由外壳维护，只会 `false -> true`；为真时已有 `html.gong-live` |
+| `fired` | boolean | 由外壳维护，只会 `false -> true`，并且 `fired => revealed` |
+| `screens` | 正整数 | 进程启动时的屏幕数量快照；每屏拥有互不共享的 JS realm 和 DOM |
+| `screen` | `GongThemeScreenV1` | 当前 WebView 对应的屏幕快照 |
+
+`screen` 字段：
+
+| 字段 | 类型与单位 | 固定语义 |
+|---|---|---|
+| `index` | 整数，`0 <= index < screens` | `NSScreen.screens` 的数组位置，没有主屏语义 |
+| `primary` | boolean | 同一进程恰好一个屏幕为 `true`；优先取启动时的 `NSScreen.main`，找不到时回退 `index === 0`，主题的单实例逻辑必须使用它 |
+| `isMain` | boolean | `NSScreen.main` 的启动快照，仅为 v1 兼容保留；主题不要用它判断 primary |
+| `w` / `h` | 正数，逻辑点 | 完整 `screen.frame` 的宽高，在 WebView 中对应逻辑 CSS 尺寸，不是物理像素 |
+| `scale` | 正数 | 每逻辑点的 backing pixels；物理尺寸约为 `w * scale`、`h * scale` |
+
+回调和方法：
+
+| 成员 | 谁赋值 | 调用语义 |
+|---|---|---|
+| `onReveal()` | 主题 | 可选；每个文档至多一次，调用时 `revealed === true` 且 `gong-live` 已存在 |
+| `onTick(now)` | 主题 | 可选；亮相后约每 100ms 调用，允许合并、跳帧和长暂停，参数恒等于当次 `gong.now` |
+| `onFire()` | 主题 | 可选；每个文档至多一次，调用时 `fired === true` 且 `gong-fired` 已存在 |
+| `done()` | 外壳 | 主题退场完成后调用；进程级幂等，只有 `screen.primary` 对应的 WebView 有效 |
+
+三个回调槽在主题代码运行前就存在，初始值固定为 `null`。数据字段由外壳拥有，主题只给回调槽赋函数并调用 `done()`；v1 为兼容旧主题没有冻结整个对象，但主题仍不得改写 `now`、状态字段、屏幕数据或两个 DOM class。`window.gong` 引用和 `apiVersion` 本身不可替换。
+
+#### 固定生命周期
+
+1. **注入**：外壳在 `.atDocumentStart` 建好完整 `window.gong`，主题同步注册需要的回调。页面可以提前加载和预热，但此时 panel 不可见。
+2. **Reveal**：到 `target - lead`，或迟到后尽快执行。外壳先显示 panel，再更新 `now`、置 `revealed = true`、添加 `html.gong-live`，最后调用 `onReveal()`。
+3. **Tick**：只在 reveal 后投递。约 100ms 是调度间隔，不是保证；主题必须用 `now - startedAt` 之类的绝对差值，不能数心跳次数。
+4. **Fire**：到 `target`，或页面晚加载后立即补发。外壳先确保 reveal 已完成，再更新 `now`、置 `fired = true`、添加 `html.gong-fired`，最后调用 `onFire()`。
+5. **Done**：主屏主题完成退场后调用 `done()`；外壳只接受主屏 WebView 的第一次消息，然后退出所有 panel。不要依赖 `unload` 做必要清理。
+6. **兜底退出**：主题没调用 `done()` 时走可见 timeout；进程另有 150 秒绝对 watchdog，全屏抑制也可能提前终止。
+
+`gong-live` 必须先于 `gong-fired`，两个 class 都只添加一次、永不移除。页面若在 reveal 或 fire 之后、但在进程兜底退出之前加载完成，外壳会按 `reveal -> fire` 顺序回放。纯 CSS 主题可以不注册回调，但只能依靠 timeout 退出。
+
+fire timer 与 heartbeat timer 相互独立，因此边界上不承诺 `onFire()` 和第一条 `now >= target` 的 `onTick(now)` 谁先到。主题必须以 `onFire()` / `fired` 进入到点阶段，不能在 `onTick` 中自行用 `now >= target` 替代 fire。
+
+回调不是异步屏障：外壳不会等待返回的 Promise 再投递后续事件。但同步异常、回调返回的 rejected Promise、全局 error 和未处理的 Promise rejection 都会带来源写进外壳 stderr；连续重复的同一来源错误会去重，动态错误也按来源限制为每秒最多一条，避免 `onTick` 刷屏。
+
+#### 版本兼容规则
+
+- `apiVersion` 是整数主版本。v1 的固定字段集不静默增删；根字段或 `screen` 字段新增、删除、改名、改类型、改单位，或者生命周期与回调签名变化，都必须发布新的主版本。
+- 旧主题不会读取 `apiVersion`，仍能运行在 v1 外壳上。新主题应先检查自己支持的版本；需要兼容旧外壳时，可以把缺少 `apiVersion` 当作 legacy v0。
+- v1 保留 `isMain`，但新的主题逻辑只能使用 `screen.primary`。目录 ID、当前未版本化的 `theme.toml` 元数据和 Theme API 主版本是三件独立的事。
+
+最小主题骨架：
+
+```html
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; }
+  .view { opacity: 0; }
+  html.gong-live .view { animation: reveal .3s forwards; }
+  @keyframes reveal { to { opacity: 1; } }
+</style>
+</head>
+<body>
+  <div class="view">...</div>
+<script>
+(() => {
+  const g = window.gong;
+  if (g.apiVersion !== 1) throw new Error('unsupported Theme API');
+
+  let firedAt = 0;
+  let lastNow = g.now;
+  g.onFire = () => { firedAt = g.now; };
+  g.onTick = now => {
+    lastNow = Math.max(lastNow, now); // 系统校时可能让 epoch 暂时回退
+    if (firedAt && lastNow - firedAt >= 1000) g.done();
+  };
+})();
+</script>
+</body>
+</html>
+```
+
+#### 主题实现规则
 
 1. **动画必须挂在 `html.gong-live` 下面。** 页面是被壳提前加载好的，按 `load` 起算会跑偏几十秒。
 2. **`target` 是绝对时间戳。** 主题不用关心自己是提前 5 秒还是 60 秒被亮出来的。
-3. **主题里不要写 `setTimeout` / `setInterval` / `requestAnimationFrame` 来卡点。** 用 `onTick` / `onFire`，理由见下。
-4. **多屏时每块屏是一个互不知情的 WebView 实例。** 任何一个喊 done 都会带走整个进程，所以壳里只认 `screen.primary === true` 那一份，其余的调了直接 return。`screen.index` 只是数组位置，不代表主屏；要判断「这块屏该不该画」用 `gong.screen.primary`。
+3. **主题里不要拿 `setTimeout`、`setInterval` 或 `requestAnimationFrame` 当业务时钟或退出闸门。** `requestAnimationFrame` 可以绘制像素，但进度仍由 `gong.now` 决定。
+4. **多屏时每块屏是一个互不知情的 WebView 实例。** `screen.index` 只是数组位置；昂贵或单实例视觉用 `screen.primary` 控制。
 5. **常驻 CSS 动画不要挂在带 `filter` 的元素上**，见第四节。
 
 ### 时间归壳，像素归主题
@@ -352,20 +468,20 @@ window.gong = {
 | nixie（每个字各跑 filter 动画） | 2801ms / 6447ms / **超过 15 秒都不来** |
 | nixie（动画收到容器上之后） | 2604ms，但仍见过整轮不来 |
 
-而壳这边的 `DispatchSourceTimer` 误差只有几毫秒。所以**时间由壳来敲**：
+而壳这边的 `DispatchSourceTimer` 通常只偏几毫秒。所以**时间由壳来敲，进度由绝对时间差决定**：
 
-- 壳每 100ms 调一次 `__gongTick(now)`
-- 壳在 `target` 那一刻调一次 `__gongFire()`
-- 主题所有的计时都换算成「心跳来了几次」，一个页面定时器都不留
+- 壳在 reveal 后约每 100ms 投递一次 `__gongTick(now)`，但允许漏帧、合并和长暂停
+- 壳用独立目标 timer 触发 `__gongFire(now)`；迟到或页面晚加载时按 `reveal -> fire` 补发
+- 主题用 `now - startedAt` 这样的绝对毫秒差推进，绝不把心跳次数当时间
 
-改完之后 nixie 连跑 8 次全部 6.61s（首次冷启 7.17s），default 连跑 4 次全部 5.50s。改之前同样的配置会随机跑出 40s / 48s——那不是「动画卡一点」，是主题永远喊不出 done、浮层挂满 60 秒才被闸门砍。
+改完之后旧版 nixie 的回归跑 8 次全部 6.61s（首次冷启 7.17s），default 连跑 4 次全部 5.50s。改之前同样的配置会随机跑出 40s / 48s——那不是「动画卡一点」，是主题永远喊不出 done、浮层挂满 60 秒才被闸门砍。
 
-代价是主题的计时精度等于心跳粒度（100ms），对这个场景绰绰有余。
+`onTick` 的视觉更新粒度通常约为 100ms，但业务时刻不因此累计漂移：下一次回调仍携带宿主当下的绝对毫秒值，`onFire` 也不依赖心跳次数。
 
 ## 八、任务清单（建议顺序）
 
 - [x] Swift 壳重构：flag 解析、延迟亮相、`window.gong` 注入、非对称时间窗、全屏复检、双闸门、日志桥、心跳
-- [x] 两个主题跑通契约：`default`（闸门）、`nixie`（辉光管）
+- [x] 两个主题跑通契约：`default`（闸门）、`nixie`（白炽灯丝）
 - [x] Go CLI：`on/off/set/ls/rm/vis/stop/fire/themes`，配置、主题解析、plist 生成、launchctl 接管
 - [x] Bubble Tea TUI：增删改查、启停、换主题、预览
 - [x] CI 预编译 universal binary + Homebrew formula
@@ -401,7 +517,7 @@ tap 用的是**已有的** `xwvike/homebrew-tap`（brew 里叫 `xwvike/tap`）�
 - **`RegisterEventHotKey`（Carbon）注册系统级热键不需要任何 TCC 授权**，对 `.accessory` 且从不激活的进程照样有效。这是唯一的正路，Apple 至今没给替代品也没弃用。
 - 代价：注册期间 Esc 会被吞掉，底下的 App 收不到。所以**只在浮层可见期间注册，退出立刻 `UnregisterEventHotKey`**。
 - **未实测**：无修饰键单独注册 Esc（modifiers 传 0）在 macOS 26 上是否会被拒。要做的时候第一件事是验这个，被拒就退到 `⌘.`。
-- 退出走优雅路径：先调 `gong.onDismiss?.()` 给主题 250ms 收尾，同时挂硬兜底强杀。
+- 退出走优雅路径时，可以在未来的 Theme API v2 设计 `onDismiss()` 给主题 250ms 收尾，同时挂硬兜底强杀；不能直接把它追加进已冻结的 v1。
 
 ## 九、现有代码
 
@@ -410,7 +526,7 @@ tap 用的是**已有的** `xwvike/homebrew-tap`（brew 里叫 `xwvike/tap`）�
 ```
 overlay.swift          Swift 壳
 themes/default/        闸门主题（原 index.html）
-themes/nixie/          辉光管主题
+themes/nixie/          白炽灯丝主题
 ```
 
 编译与自测：
@@ -424,7 +540,7 @@ swiftc -O overlay.swift -o gong-overlay
                --name noon --theme themes/nixie/index.html
 ```
 
-`--force` 跳过时间窗和全屏判断，是 `gong vis` 的雏形。主题里的 `console.log` 和未捕获异常会打到 stderr，前缀 `gong-overlay[js]`。
+这里的 `--at` 是兼容旧调用方的“按当天解析”参数；生产调度应同时传本次目标的 `--target <Unix 秒>`。`--force` 跳过时间窗和全屏判断，是 `gong vis` 的雏形。主题里的 `console.log` 和未捕获异常会打到 stderr，前缀 `gong-overlay[js]`。
 
 ---
 

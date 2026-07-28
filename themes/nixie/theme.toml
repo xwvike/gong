@@ -1,7 +1,7 @@
 # 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
-name      = "辉光管"
-desc      = "六管辉光管时钟悬在屏幕正中，只留灯丝。走到目标时刻整排过载一下，文字浮出。"
+name      = "白炽灯丝"
+desc      = "六位钨丝时钟由暗红升至暖白，到点过载后只留下缓慢冷却的余辉。"
 lead      = 5        # 提前 5 秒亮相，让你看着秒位跳到整点
-duration  = 10       # 预期可见时长（秒）：lead 5 + 到点后 4 左右
+duration  = 10       # 从实际亮相到视觉预计结束的秒数：lead 5 + 到点后 4 左右
 placement = "center" # 会挡住屏幕中央，别配在需要盯着干活的时段
-webgl     = false
+webgl     = true      # 仅声明性元数据，主题自行处理 WebGL/Canvas 降级

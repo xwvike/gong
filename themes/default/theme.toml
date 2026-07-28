@@ -2,6 +2,6 @@
 name      = "闸门"
 desc      = "上下两道闸门压进来，文字逐字砸下，五秒后收回。中间留空不挡视线。"
 lead      = 0      # 提前多少秒亮相。0 = 整点出现
-duration  = 6      # 预期可见时长（秒）。壳的兜底 = duration + 余量，且不超过 60
+duration  = 6      # 从实际亮相到视觉预计结束的秒数；壳的兜底 = duration + 余量，且不超过 60
 placement = "edge" # center / edge / corner —— 给 TUI 提示会不会挡住正在看的东西
-webgl     = false
+webgl     = false  # 仅声明性元数据，Go/外壳不据此改变行为

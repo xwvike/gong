@@ -20,9 +20,9 @@ type Meta struct {
 	Name      string `toml:"name"`      // 展示名，可以是中文
 	Desc      string `toml:"desc"`      //
 	Lead      int    `toml:"lead"`      // 提前多少秒亮相
-	Duration  int    `toml:"duration"`  // 预期可见时长（秒）
+	Duration  int    `toml:"duration"`  // 从实际亮相到视觉预计结束的秒数
 	Placement string `toml:"placement"` // center / edge / corner
-	WebGL     bool   `toml:"webgl"`
+	WebGL     bool   `toml:"webgl"`     // 声明性元数据；当前不改变 Go/外壳行为
 }
 
 type Theme struct {
@@ -35,8 +35,9 @@ type Theme struct {
 
 // 壳那边写死的上限，这里跟着 clamp，免得生成出一条壳会拒绝的命令行
 const (
-	MaxLead    = 60
-	MaxVisible = 60
+	MaxLead       = 60
+	MaxVisible    = 60
+	timeoutMargin = 10
 )
 
 func (t Theme) LeadSeconds() int {
@@ -56,9 +57,10 @@ func (t Theme) TimeoutSeconds() int {
 	if d <= 0 {
 		d = 10
 	}
-	d += 10
-	if d > MaxVisible {
+	if d >= MaxVisible-timeoutMargin {
 		d = MaxVisible
+	} else {
+		d += timeoutMargin
 	}
 	return d
 }
