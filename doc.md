@@ -454,7 +454,13 @@ interface GongThemeAPIV1 {
 
 `gong-live` 必须先于 `gong-fired`，两个 class 都只添加一次、永不移除。页面若在 reveal 或 fire 之后、但在进程兜底退出之前加载完成，外壳会按 `reveal -> fire` 顺序回放。纯 CSS 主题可以不注册回调，但只能依靠 timeout 退出。
 
-fire timer 与 heartbeat timer 相互独立，因此边界上不承诺 `onFire()` 和第一条 `now >= target` 的 `onTick(now)` 谁先到。主题必须以 `onFire()` / `fired` 进入到点阶段，不能在 `onTick` 中自行用 `now >= target` 替代 fire。
+**`onFire()` 保证早于第一条 `now >= target` 的 `onTick(now)`。** 主题想用哪个进入到点阶段都行——注册 `onFire`，或者在 `onTick` 里自己判断 `now >= target`，两者等价。
+
+这个保证是心跳在派发 tick 之前先补一刀 fire 换来的（`overlay.swift` 的 `every(heartbeatInterval)`）。fire 另有一个专用 timer 负责精度，心跳这一刀只负责顺序，两者取先到的那个。
+
+之前这里写的是反过来的规则——「两个 timer 独立，顺序不承诺，主题必须走 `onFire()`」。那条规则是在拿文档去补实现的洞，而且洞比想象中大：实测专用 fire timer 比心跳**晚 159–483ms**（它跟心跳的 `evaluateJavaScript` 抢主队列，leeway 又是 50ms 对 20ms），所以旧行为下 `TICK >= target` 几乎每次都先于 `onFire()` 到达。补刀之后 fire 的延迟降到 **13–99ms**，顺序也恒定了。
+
+**推论：`fired` 和 `revealed` 这两个状态字段，主题不需要读。** `fired` 等价于 `now >= target`，`revealed` 等价于「收到过 onTick」（心跳是在 reveal 里才启动的）。v1 冻结了字段集所以它们还在对象上，但新主题不该依赖——壳应该只给时间，状态让主题自己从时间推。仓库里两个主题现在都不读它们。
 
 回调不是异步屏障：外壳不会等待返回的 Promise 再投递后续事件。但同步异常、回调返回的 rejected Promise、全局 error 和未处理的 Promise rejection 都会带来源写进外壳 stderr；连续重复的同一来源错误会去重，动态错误也按来源限制为每秒最多一条，避免 `onTick` 刷屏。
 

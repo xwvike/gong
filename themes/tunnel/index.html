@@ -237,8 +237,9 @@
 
   g.onReveal = () => {
     revealedAt = g.now;
-    // 已经到点了才亮相（补发路径）就不倒数了，等 onFire 直接出结果。
-    if (!g.fired) tickCountdown(g.now);
+    // 迟到才亮相（补发路径）时不用特判：tickCountdown 里的 left < 1 已经
+    // 把它挡掉了。壳的状态字段一个都不读，只读时间。
+    tickCountdown(g.now);
   };
 
   g.onFire = () => {

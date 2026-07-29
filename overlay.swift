@@ -182,6 +182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private var opts = Options()
     private var revealed = false
     private var fired = false
+    /// 本次的目标时刻。心跳要用它做「tick 之前先补 fire」的判断，所以存成属性。
+    private var target = Date.distantFuture
     private var finished = false
     private weak var primaryWeb: WKWebView?
 
@@ -221,6 +223,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             webs.append(web)
             if idx == primaryIndex { primaryWeb = web }
         }
+
+        self.target = target
 
         let revealAt = target.addingTimeInterval(-Double(opts.lead))
         after(max(revealAt.timeIntervalSince(now), 0)) { [weak self] in self?.reveal() }
@@ -281,6 +285,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         // 而壳这边的 DispatchSourceTimer 误差只有几毫秒。时间归壳，像素归主题。
         every(heartbeatInterval) { [weak self] in
             guard let self else { return }
+            // 派发 tick 之前先把 fire 补上，保证 onFire 一定早于第一条
+            // now >= target 的 onTick。没有这一刀，主题就没法自己用
+            // now >= target 判断到点，只能被迫走 onFire——等于壳把一种写法
+            // 强加给了所有主题。
+            //
+            // 别以为这只是个顺序补丁：applicationDidFinishLaunching 里那个
+            // 专用 fire timer 看着像「高精度」，实测反而是它慢。它跟心跳的
+            // evaluateJavaScript 抢主队列，leeway 又是 50ms（心跳 20ms），
+            // 实测比心跳晚 159-483ms，于是旧行为下 tick 几乎每次都跑在
+            // onFire 前面。加上这一刀之后 fire 延迟降到 13-99ms。
+            //
+            // 两个 timer 都留着，取先到的那个：谁快算谁的。
+            if !self.fired, Date() >= self.target { self.fire() }
             self.eachLoadedWeb { $0.evaluateJavaScript(
                 "window.__gongTick && window.__gongTick(\(self.nowMillis()))",
                 completionHandler: nil) }
