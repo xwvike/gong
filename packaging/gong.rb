@@ -12,7 +12,7 @@
 class Gong < Formula
   desc "到点在所有屏幕最顶层播一段动画的定时提醒，不抢焦点、不吃点击"
   homepage "https://github.com/xwvike/gong"
-  version "0.1.2"
+  version "0.1.3"
   license "MIT"
 
   url "https://github.com/xwvike/gong/releases/download/v#{version}/gong-#{version}-macos-universal.tar.gz"
@@ -33,7 +33,8 @@ class Gong < Formula
 
         gong on
 
-      默认两条：noon 12:00、evening 18:00，周一到周五。
+      默认两条：#1 12:00（午间）、#2 18:00（下班），周一到周五。
+      定时不用起名字——标签是可选的，纯装饰，留空就用编号。
       要增删改查、换主题、预览，跑 gong set。
 
       卸载走这条，别直接 brew uninstall：
