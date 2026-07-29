@@ -1,0 +1,7 @@
+# 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
+name      = "字幕隧道"
+desc      = "倒数的数字由远及近迎面冲来，到点时刻停在正中，随后放大穿过屏幕散去。"
+lead      = 5        # 倒数要 5 秒跑完，所以提前 5 秒亮相
+duration  = 8        # 5s 倒数 + 1.5s 停留 + 1.2s 退场，留点余量
+placement = "center" # 字在屏幕正中，会挡视线
+webgl     = false    # 纯 CSS transform，没有 canvas 也没有 WebGL

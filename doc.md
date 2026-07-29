@@ -5,7 +5,7 @@
 
 ## 一、当前状态
 
-Swift 壳已重构完成并实测通过，两个主题跑通了完整契约。**代码就在本仓库**（不再是 `~/.offwork/`）。
+Swift 壳已重构完成并实测通过，`default`（LED 信号板）和 `tunnel`（字幕隧道）两个主题都跑通了完整契约。**代码就在本仓库**（不再是 `~/.offwork/`）。
 
 | 项 | 结果 |
 |---|---|
@@ -574,6 +574,7 @@ tap 用的是**已有的** `xwvike/homebrew-tap`（brew 里叫 `xwvike/tap`）�
 ```
 overlay.swift          Swift 壳
 themes/default/        LED 信号板主题（第三版内容，见下面「主题两次推翻」）
+themes/tunnel/         字幕隧道主题（倒数数字迎面冲来，见下面「隧道主题」）
 ```
 
 编译与自测：
@@ -595,6 +596,18 @@ swiftc -O overlay.swift -o gong-overlay
 `internal/config/config.go` 的 `Default()` 原来给"午间"那条配了 `nixie`，`nixie` 一删这条默认配置就会在 `gong on` 时报"主题找不到"——已经改成两条默认定时都指 `default`。`internal/agent/agent_test.go` 里两个依赖"某个主题 lead=5"的跨午夜测试，原来抄近路直接写死 `s.Theme = "nixie"`（依赖仓库里恰好有这么一个主题，测试跟具体主题耦合，这次改的时候才发现这个问题），换成了测试自建的临时主题目录，不再依赖仓库里现存哪些主题。
 
 这里的 `--at` 是兼容旧调用方的“按当天解析”参数；生产调度应同时传本次目标的 `--target <Unix 秒>`。`--force` 跳过时间窗和全屏判断，是 `gong vis` 的雏形。主题里的 `console.log` 和未捕获异常会打到 stderr，前缀 `gong-overlay[js]`。
+
+### 隧道主题（`tunnel`）：从 React 组件移植过来的三个决定
+
+原件是一个 framer-motion 组件（ZoomTextTunnel / "Infinite Text Passage"）：两个 slot 轮流用，词从 `scale(.05)` 进场到 1，上一个词放大到 35 倍并淡出，`while(true)` 配 `setTimeout(hold)` 无限循环。移植到 gong 时有三处**不能照抄**：
+
+1. **无限循环必须改成由 `gong.now` 驱动。** 原件的节奏是 `hold(600ms) + duration(1.2s)`，靠 `await settle()` 保证两段动画永不重叠。gong 这边节奏由绝对时间定死——倒数显示的数字是 `ceil((target - now)/1000)` **现算**的，不是数心跳数出来的。好处是心跳抖动、页面卡顿甚至整段掉帧，数字都还是对的；坏处是 1 秒的间隔比 1.2 秒的过渡短，两个 slot 必然撞车。
+
+2. **两个 slot 改成一个词一个节点。** 撞车的直接后果是：新词要复用的那个 slot 还在半路上飞（opacity 还有一半），把它瞬间掰回 `scale(.06)` 会看见一次明显的跳变。改成新词进场时只通知上一个词开始飞出去、不等它，被打断的词带着当前 scale 继续飞（CSS 过渡本来就能从中途接管）。实测同屏最多 3 个词在不同深度，反而比原件更像隧道。节点回收不挂 `transitionend`，统一在 `onTick` 里按绝对时间扫——**全场只有一个时钟**。
+
+3. **`transition` 里的 `stiffness / damping / mass` 是死参数。** 原件写了这三个，但 `type` 是 `"tween"`，framer-motion 在 tween 模式下根本不读它们；真正生效的只有 `duration` 和 `ease`。所以 CSS 侧只需要一条 `1.2s cubic-bezier(.7,0,.25,1)` 就是一比一等价，不用去凑弹簧参数。
+
+另外两点：倒数几个数由壳注入的 `gong.lead` 决定，不在主题里再写死一份——否则 `theme.toml` 的 lead 改成 10 而主题还从 5 开始数，前 5 秒就是一片没有字的压暗，看着像主题坏了。字体没用原 props 指定的 Inter：主题不能发外部请求也没随包带字体文件，走 `-apple-system`（WKWebView 里就是 SF Pro），大字号下观感接近。
 
 ---
 

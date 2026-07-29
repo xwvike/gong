@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>gong · tunnel</title>
+<style>
+  /* 背景必须真透明——壳那边已经关掉 WebView 的绘制背景了 */
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden;
+               -webkit-user-select:none; cursor:none; }
+
+  #stage {
+    position: fixed; inset: 0;
+    opacity: 0;
+    transition: opacity .5s ease-out;
+    will-change: opacity;
+  }
+  html.gong-live #stage { opacity: 1; }
+  /* 退场时长由 JS 按 CONFIG.enterMs 写进来，跟词的飞出保持同步 */
+  #stage.leaving { opacity: 0; }
+
+  /* 中央压暗一圈，让白字在任意桌面背景上都读得出来。
+     刻意不铺满：gong 的前提是盖在桌面上而不是盖住桌面，
+     所以只在字所在的中央做一层径向压暗，边缘完全透明。 */
+  #veil {
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at 50% 50%,
+      rgba(0,0,0,.60) 0%, rgba(0,0,0,.44) 34%, rgba(0,0,0,0) 72%);
+  }
+
+  /* 每个词一个独立元素，绝对定位铺满整屏、居中。
+     字号跟视口走：原组件写死 120px 是给它自己那个小预览框配的，
+     全屏浮层上按 vw 算才跟屏幕大小无关。 */
+  .word {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    white-space: pre;
+    color: #FFFFFF;
+    /* 原 props 指定 Inter。主题不能发外部请求，也没随包带字体文件，
+       所以走系统字体——WKWebView 里 -apple-system 就是 SF Pro，
+       同样是几何无衬线，大字号下的观感跟 Inter 很接近。 */
+    font-family: -apple-system, "SF Pro Display", "Helvetica Neue", Inter, sans-serif;
+    font-weight: 700;
+    font-size: clamp(4rem, 17vw, 20rem);
+    line-height: 1em;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    transform: scale(.06);
+    opacity: 0;
+    transform-origin: center center;
+    /* 提升成独立图层：放大到 35 倍时让合成器缩放位图，而不是让主线程
+       按最终尺寸重新栅格化字形。放大过程中同时在淡出，位图拉伸的模糊
+       看不出来，换来的是不掉帧。 */
+    will-change: transform, opacity;
+    transition: transform 1.2s cubic-bezier(.7, 0, .25, 1),
+                opacity   1.2s cubic-bezier(.7, 0, .25, 1);
+  }
+  .word.in  { transform: scale(1); opacity: 1; }
+  .word.out { transform: scale(var(--max-scale, 35)); opacity: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #stage, .word { transition-duration: .01ms; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="veil"></div>
+    <div id="tunnel"></div>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  const g = window.gong;
+
+  // ── 原组件的 props 在这里变成写死的配置。静态主题没有调用方，
+  //    想改文案节奏就直接改这一段。 ────────────────────────────
+  const CONFIG = {
+    // 原组件 maxScale 默认 35：退场的词要冲出视口才有「穿过去」的感觉。
+    maxScale: 35,
+    // 进退场时长。原组件 transition 里那堆 stiffness/damping/mass 是死参数
+    // ——type 是 "tween" 的时候 framer-motion 根本不看它们，真正生效的只有
+    // duration 和 ease，所以这里就只留这两个，CSS 一比一对得上。
+    enterMs: 1200,
+    ease: 'cubic-bezier(.7, 0, .25, 1)',
+    // 到点之后那张牌停留多久再冲出去
+    holdMs: 1500,
+    // 拿不到 g.lead 时倒数从几开始。正常情况下这个值直接跟着 theme.toml 的
+    // lead 走（见下面的 countFrom）——写死成 5 而 lead 被改成 10 的话，
+    // 前 5 秒就是一片什么都没有的压暗，看着像主题坏了。
+    countFromFallback: 5,
+    // 到点这一下显示什么。收到的是 g.target（这条定时的绝对目标时刻），
+    // 不是 now——显示的应该是「约定的那个点」，不是渲染到这一帧的墙上时间。
+    finalText: ms => formatClock(ms),
+  };
+
+  const stage = document.getElementById('stage');
+  const tunnel = document.getElementById('tunnel');
+
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  function formatClock(ms) {
+    const d = new Date(ms);
+    return pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  // ── 隧道本体 ──────────────────────────────────────────────
+  //
+  // 原组件用两个 slot 来回倒，每次换词都要 await 上一段动画 settle，
+  // 靠的是 hold(600ms) + duration(1.2s) 永远不重叠。gong 这边节奏是由
+  // 绝对时间定的（每整秒换一个数字），1 秒的间隔比 1.2 秒的过渡短，
+  // 两个 slot 必然撞车——一个还在飞出去就得被当成下一个词重新用。
+  //
+  // 所以改成一个词一个节点：新词进场时只是叫上一个词开始飞出去，不等它。
+  // 被打断的词就带着当前的 scale 继续往外飞（CSS 过渡本来就能从中途接管），
+  // 屏幕上同时有好几个词在不同深度飞，反而更像隧道。
+  // 节点回收不挂 transitionend，统一在 onTick 里按绝对时间扫——
+  // 全场只有一个时钟。
+  const flying = [];
+  let current = null;
+
+  function push(text, now) {
+    if (current) {
+      current.el.classList.remove('in');
+      current.el.classList.add('out');
+      current.exitAt = now;
+      flying.push(current);
+    }
+
+    const el = document.createElement('div');
+    el.className = 'word';
+    el.textContent = text;
+    el.style.transitionDuration = CONFIG.enterMs + 'ms';
+    el.style.transitionTimingFunction = CONFIG.ease;
+    tunnel.appendChild(el);
+
+    // 先让浏览器把 scale(.06) 这个初始状态真正算一遍，
+    // 否则同一帧里加上 .in 会被合并成「一开始就是 scale(1)」，没有进场动画。
+    void el.offsetWidth;
+    el.classList.add('in');
+
+    current = { el, exitAt: 0 };
+  }
+
+  function sweep(now) {
+    for (let i = flying.length - 1; i >= 0; i--) {
+      // 飞完了才删。多给一点余量，免得在过渡的最后一帧上把节点抽掉。
+      if (now - flying[i].exitAt >= CONFIG.enterMs + 150) {
+        flying[i].el.remove();
+        flying.splice(i, 1);
+      }
+    }
+  }
+
+  document.documentElement.style.setProperty('--max-scale', CONFIG.maxScale);
+
+  // ── 生命周期 ──────────────────────────────────────────────
+  //
+  // 三条时间线全部问 g.now，不问 setTimeout：页面是提前加载好的，
+  // 亮相可能发生在加载后很久，数心跳会越数越偏。
+  let revealedAt = 0;
+  let firedAt = 0;
+  let leavingAt = 0;
+  let lastCount = 0;
+  let doneSent = false;
+
+  // 倒数几个数由壳注入的 lead 决定，不另写一份。lead 是 0（到点才亮相）
+  // 时下面的 left < 1 会让倒数整段跳过，直接等 onFire。
+  const countFrom = Math.max(1, Math.round(Number(g.lead) || CONFIG.countFromFallback));
+
+  function secondsLeft(now) {
+    return Math.ceil((g.target - now) / 1000);
+  }
+
+  // 倒数显示的是「现算出来的剩余秒数」，不是「第几次心跳」。
+  // 心跳抖动、页面卡顿、甚至整段掉帧，数字都还是对的。
+  function tickCountdown(now) {
+    const left = secondsLeft(now);
+    if (left < 1 || left > countFrom) return;
+    if (left === lastCount) return;
+    lastCount = left;
+    push(String(left), now);
+  }
+
+  g.onReveal = () => {
+    revealedAt = g.now;
+    // 已经到点了才亮相（补发路径）就不倒数了，等 onFire 直接出结果。
+    if (!g.fired) tickCountdown(g.now);
+  };
+
+  g.onFire = () => {
+    if (firedAt) return;
+    firedAt = g.now;
+    push(CONFIG.finalText(g.target), g.now);
+  };
+
+  g.onTick = now => {
+    if (!revealedAt) return;
+    sweep(now);
+
+    if (!firedAt) {
+      tickCountdown(now);
+      return;
+    }
+    if (!leavingAt && now - firedAt >= CONFIG.holdMs) {
+      leavingAt = now;
+      stage.style.transitionDuration = CONFIG.enterMs + 'ms';
+      if (current) {
+        current.el.classList.remove('in');
+        current.el.classList.add('out');
+        current.exitAt = now;
+        flying.push(current);
+        current = null;
+      }
+      stage.classList.add('leaving');
+    }
+    if (leavingAt && !doneSent && now - leavingAt >= CONFIG.enterMs + 150) {
+      doneSent = true;
+      // 每块屏各跑各的，不用判断 primary——非主屏这一句会被壳注入的 gong.done 安静吃掉
+      g.done();
+    }
+  };
+})();
+</script>
+</body>
+</html>
