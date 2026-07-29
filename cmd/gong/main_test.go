@@ -31,6 +31,27 @@ func TestOverlayArgsCarryAbsoluteTarget(t *testing.T) {
 	t.Fatal("overlay 参数里没有 --target")
 }
 
+// 没标签时 DisplayName 会现算出 "#N"，跟前面的序号撞车——这是默认路径，不是边角。
+func TestRmPreviewDoesNotRepeatIndex(t *testing.T) {
+	s := config.Schedule{At: "12:00:00", Weekdays: []int{1}, Theme: "default"}
+	got := rmPreview(2, s)
+	if strings.Contains(got, "#2 #2") {
+		t.Errorf("没标签时序号打了两遍：%q", got)
+	}
+	if !strings.HasPrefix(got, "即将删除：#2 12:00:00") {
+		t.Errorf("rmPreview = %q", got)
+	}
+
+	s.Label = "午间"
+	got = rmPreview(2, s)
+	if !strings.Contains(got, "标签 午间") {
+		t.Errorf("有标签时该带上标签：%q", got)
+	}
+	if !strings.HasPrefix(got, "即将删除：#2 ") {
+		t.Errorf("有标签时序号也得在最前面：%q", got)
+	}
+}
+
 // 下面三个只测「参数不对」的早退分支——这几支在到达 config.LoadOrDefault()
 // 之前就返回了，不会碰真实 HOME 下的配置，更不会走到 install()/launchctl。
 // confirmed-删除那条路径特意不在这里自动化：cmdRm 成功时一定会调 install()，

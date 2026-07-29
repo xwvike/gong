@@ -407,7 +407,7 @@ func cmdRm(args []string) error {
 		return fmt.Errorf("没有第 %d 条定时（跑 gong ls 看看现在有几条）", n)
 	}
 
-	fmt.Printf("即将删除：#%d %s %s %s  主题 %s\n", n, s.DisplayName(n-1), s.At, s.WeekdaysLabel(), s.Theme)
+	fmt.Println(rmPreview(n, *s))
 	if !yes && !confirm("确定吗？[y/N] ") {
 		fmt.Println("取消了，什么都没动。")
 		return nil
@@ -423,6 +423,21 @@ func cmdRm(args []string) error {
 	fmt.Println("已删除", display)
 	// 定时是共用一个 plist 的，删一条要重新生成整份
 	return install(c)
+}
+
+// rmPreview 是删除前给人确认的那一行。
+//
+// 序号自己打，不走 DisplayName：标签是可选的，大多数定时根本没有，而
+// DisplayName 在没标签时正好回落成 "#N"——前面再拼一个 #%d 就成了
+// 「即将删除：#2 #2 12:00:00」，序号打两遍。有标签才把它补在后面。
+// 抽成函数纯粹是为了能测：cmdRm 走完确认之后一定会调 install()，
+// 那会真的碰 launchctl，整条路径没法进 go test。
+func rmPreview(n int, s config.Schedule) string {
+	line := fmt.Sprintf("即将删除：#%d %s %s  主题 %s", n, s.At, s.WeekdaysLabel(), s.Theme)
+	if s.Label != "" {
+		line += "  标签 " + s.Label
+	}
+	return line
 }
 
 func cmdThemes() error {

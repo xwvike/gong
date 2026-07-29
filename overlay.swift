@@ -142,6 +142,14 @@ func parseArgs() -> Options {
         }
         i += 1
     }
+    // 主题路径必须由 Go 侧算好传进来。壳不猜路径：它不读配置、也不知道
+    // 内置主题装在哪（brew 前缀下的 share/gong/themes，只有 Go 侧的 ldflags
+    // 和回落逻辑清楚）。以前这里缺 --theme 会去试 ~/.config/gong/themes/default，
+    // 那既写死了一个主题名，又只猜用户目录——brew 装的内置主题根本不在那儿，
+    // 于是必然报 theme not found，等于用一条更难懂的错误替换掉了真正的原因。
+    if o.theme.isEmpty {
+        reportInvalid("missing --theme")
+    }
     return o
 }
 
@@ -187,10 +195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         guard opts.force || (insideTimeWindow(now: now, target: target) && !fullscreenAppInFront())
         else { Darwin.exit(0) }
 
-        let path = opts.theme.isEmpty
-            ? (NSHomeDirectory() as NSString).appendingPathComponent(".config/gong/themes/default/index.html")
-            : (opts.theme as NSString).expandingTildeInPath
-        let html = URL(fileURLWithPath: path)
+        // parseArgs 已经保证 theme 非空，这里只做 ~ 展开
+        let html = URL(fileURLWithPath: (opts.theme as NSString).expandingTildeInPath)
         guard FileManager.default.fileExists(atPath: html.path) else {
             FileHandle.standardError.write("gong-overlay: theme not found: \(html.path)\n".data(using: .utf8)!)
             Darwin.exit(1)
