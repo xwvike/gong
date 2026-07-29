@@ -1,107 +1,129 @@
 # gong（锣）
 
-到点在所有屏幕最顶层播一段 HTML 动画，宣告某个时刻到了，播完自动退出。
+I'm outta here!
 
-不抢焦点（你正在打字，光标纹丝不动）、不吃点击（鼠标当它不存在）、背景真透明（盖在桌面上而不是盖住桌面）、**常驻进程数为 0**。
-
-## 装
+## 安装
 
 ```bash
 brew install xwvike/tap/gong
 gong on
 ```
 
-`gong on` 之后立刻可用，不用重启也不用登出。默认两条定时：中午 12:00、傍晚 18:00，周一到周五。
+默认启用两条定时：#1 12:00、#2 18:00，周一到周五。
 
-## 卸
+
+```bash
+gong set            # 进入定时器管理
+gong ls             # 列出现有定时
+gong themes         # 列出可用主题
+gong vis <theme>    # 预览一个主题
+gong stop           # 掐掉正在播的浮层
+gong off            # 关掉 gong，但保留配置和程序
+```
+
+## 主题
+
+### default
+
+<img src="docs/default.png" alt="default" width="720">
+
+### tunnel
+
+<img src="docs/tunnel.gif" alt="tunnel" width="720">
+
+### 自定义主题
+
+一个目录就是一个主题（`index.html` + `theme.toml`），放进
+`~/.config/gong/themes/<name>/` 即可，gong 启动会自动扫描。主题同名会覆盖。
+
+#### HTML接受
+
+**一、两个 class，挂在 `<html>` 上**
+
+| class | 什么时候加上 |
+|---|---|
+| `html.gong-live` | 浮层亮相，动画从这一刻开始 |
+| `html.gong-fired` | `now` 走到了 `target` |
+
+加上就不再移除。这是**给纯 CSS 主题用的时间通道**——CSS 没有时钟，拿不到下面那个
+`now`，只能靠这两个 class 知道「开始了」和「到点了」。只用它俩就能写出一行 JS
+都没有的主题。
+
+**二、一个 `window.gong` 对象**，在你的脚本跑起来之前就注入好了
+
+```js
+window.gong = {
+  apiVersion: 1,          // 接口版本，恒为 1
+  target: 1753588800000,  // 目标时刻（Unix 毫秒），从头到尾不变
+  now:    1753588795012,  // 现在几点，每次回调前刷新
+  lead: 5,                // 提前几秒亮相
+  force: false,           // true 表示这是 gong vis 预览
+  revealed: false,        // ↓ 这两个是 v1 的历史包袱，新主题别读，见下
+  fired: false,           //
+  screens: 1,             // 一共几块屏
+  screen: {index: 0, isMain: true, primary: true, w: 1512, h: 982, scale: 2},
+
+  // 下面三个是空槽，你把函数填进去，外壳到时候会调
+  onReveal: null,         // 亮相了，开始演
+  onTick: null,           // 亮相后每 100ms 一次，参数就是当前的 now
+  onFire: null,           // now 走到 target 了（迟到才加载的话立刻补发）
+
+  done() {}               // 这个方向反过来，见下
+};
+```
+
+填法就是赋值：
+
+```js
+const g = window.gong;
+g.onReveal = () => { /* 开始演 */ };
+g.onTick = now => { /* 用 now 的绝对差值推进，别数心跳次数 */ };
+g.onFire = () => { /* now 走到 target 了 */ };
+```
+
+`onFire()` 保证早于第一条 `now >= target` 的 `onTick(now)`，所以这两种写法等价——
+想在 `onTick` 里自己判断 `now >= target` 也行，不必非注册 `onFire`。
+
+**外壳只给时间和屏幕，一个字的文案都不给。** 没有 message 之类的字段。定时的标签、
+`theme.toml` 里的内容、一共有几条定时，一概不传。屏幕上出现什么字，全是主题自己
+写死或算出来的——想要不同的提醒形式就写不同的主题，别在一个主题里按定时分支。
+
+`fired` / `revealed` 是 v1 留下的状态字段，**新主题别读**：`fired` 就是
+`now >= target`，`revealed` 就是「收到过 `onTick`」（心跳在亮相后才启动）。
+状态从时间自己推，别依赖壳递过来。仓库里两个主题都不读它们。
+
+#### HTML → 外壳
+
+**只有一个：`g.done()`**，意思是「我演完了，可以退了」。
+
+退场动画结束后再调。调完外壳立刻关掉所有屏幕上的浮层并退出进程。不调也行，
+外壳会等到 timeout（`theme.toml` 里的 `duration` + 余量）自己退，只是会多挂一会儿。
+
+多屏时每块屏各跑一份 HTML，`done()` 只有主屏那份算数，其余的会被安静忽略。
+判断主屏用 `window.gong.screen.primary`，别假设 `screen.index === 0` 是主屏。
+
+#### 三个坑
+
+1. **动画挂在 `html.gong-live` 下面**，别按 `load` 起算。页面是提前加载好的，
+   可能在亮相前几十秒就 load 完了。
+2. **别用 `setTimeout` / `setInterval` / `requestAnimationFrame` 当时钟或退出闸门**，
+   用 `onTick(now)` 的绝对时间和 `onFire`。rAF 可以画帧，但不能决定是否到点。
+3. **常驻 CSS 动画别挂在带 `filter` 的元素上**，挂容器上。前者会把主线程压死，
+   压死之后连 JS 定时器都不来了，主题永远喊不出 `done()`。
+
+写完直接 `gong vis <theme>` 调试，预览和真实触发走的是完全同一条渲染路径。
+主题里的 `console.log` 和未捕获异常都会打到 stderr。
+
+完整的类型、单位、不变量和生命周期见 [Theme API v1](doc.md#theme-api-v1)。
+
+## 卸载gong
 
 ```bash
 gong uninstall
 ```
 
-清 plist、从 launchd 撤出，最后自动帮你跑 `brew uninstall`。加 `--purge` 连
-`~/.config/gong`（含你自己写的主题）一起删，加 `-y` 跳过确认。
+参数 `--purge` 会同时清除自定义主题目录 `~/.config/gong`。
 
-**别直接 `brew uninstall gong`** —— formula 没有 uninstall hook，
-`~/Library/LaunchAgents` 里的 plist 会留下来，每天到点去拉一个不存在的二进制，
-而且是静默失败。
-
-只想暂停一阵子、程序留着：`gong off`。
-
-装完你会在「系统设置 → 通用 → 登录项与扩展 → 允许在后台」里看到**一个**叫 gong 的条目。
-不管配了多少条定时都只有一个，而且它**不会在登录时运行任何东西**（`RunAtLoad` 是 `false`），
-只是告诉 launchd 到点叫醒一次。
-
-## 用
-
-```bash
-gong set            # TUI：增删改查定时、换主题、预览
-gong ls             # 看看现在有哪些定时，以及是不是真的接管了
-gong vis default    # 预览一个主题
-gong stop           # 掐掉正在播的浮层
-gong themes         # 列出可用主题
-```
-
-## 主题
-
-标准主题就是一个目录：`index.html` 负责表现，`theme.toml` 负责给 Go 提供元数据。放进 `~/.config/gong/themes/<name>/` 就能用，同名会盖住内置主题；旧主题可以省略 `theme.toml` 并使用默认元数据。
-
-```toml
-name      = "白炽灯丝"
-desc      = "六位钨丝时钟由暗红升至暖白，到点后留下冷却余辉。"
-lead      = 5        # 提前多少秒亮相（launchd 只有分钟精度，剩下的由壳自己等）
-duration  = 10       # 从实际亮相到视觉预计结束的总秒数
-placement = "center" # center / edge / corner，目前只用于遮挡范围提示
-webgl     = true     # 仅声明主题会自行尝试 WebGL；上下文及降级由主题自己负责
-```
-
-外壳会在 `.atDocumentStart` 注入固定的 **Theme API v1**。下面这些字段和回调槽始终存在；完整类型、单位、不变量、生命周期和兼容规则见 [Theme API v1](doc.md#theme-api-v1)。
-
-```js
-// 宿主注入的固定形状（示意）；主题不要执行这段赋值或替换 window.gong。
-window.gong = {
-  apiVersion: 1,
-  target: 1753588800000, now: 1753588795012, lead: 5, force: false,
-  revealed: false, fired: false, screens: 1,
-  screen: {index: 0, isMain: true, primary: true, w: 1512, h: 982, scale: 2},
-  onReveal: null, onTick: null, onFire: null,
-  done() {}
-};
-
-const g = window.gong;
-g.onReveal = () => { /* 壳亮相后开始表现 */ };
-g.onTick = now => { /* 用绝对时间差推进，不要数心跳 */ };
-g.onFire = () => { /* 到达目标时刻，或迟到后立即补发 */ };
-// 退场动画完成后再调用；定义函数不会让主题加载时立即退出：
-const finish = () => g.done();
-```
-
-多屏主题可用 `window.gong.screen.primary` 判断当前实例是不是主屏；不要假设 `screen.index === 0` 一定是主屏。
-
-三条要紧的：
-
-1. **动画挂在 `html.gong-live` 下面**。页面是被提前加载好的，按 `load` 起算会跑偏。到点后还会多一个 `html.gong-fired`，纯 CSS 主题可以一行 JS 都不写。
-2. **别用 `setTimeout` / `setInterval` / `requestAnimationFrame` 当时钟或退出闸门**，用 `onTick(now)` 的绝对时间和 `onFire`。`requestAnimationFrame` 可以画帧，但不能决定是否到点。
-3. **常驻 CSS 动画别挂在带 `filter` 的元素上**，挂容器上。前者会把主线程压死。
-
-Go 只读取 `theme.toml`、计算调度参数并启动 Swift 外壳；Swift 再把时间和屏幕快照组装成上面的固定对象。HTML 不会直接收到 TOML、定时名称或提醒文案，`webgl = true` 也不会替页面创建 WebGL 上下文。
-
-调试直接 `gong vis <theme>`——预览和真实触发走完全同一条渲染路径。主题的 console、同步回调异常和未处理的 Promise rejection 都会打到 stderr。纯 CSS 主题可以不注册回调，但只能等外壳 timeout 退出；需要精确收尾就由主屏调用 `done()`。
-
-## 为什么不是别的
-
-`mpv --fullscreen --ontop` 和 Chrome `--app` 都会激活自己的 App、抢焦点；Tauri 的 `alwaysOnTop` 只到 floating 层，盖不住别的 App 的全屏窗口；Electron 方案常驻 150–250MB。
-
-最后是一个 124K 的 Swift 壳（`NSPanel` + `.nonactivatingPanel` + screenSaver 层）加 WKWebView：窗口语义用原生，动画用 HTML/CSS 写，改效果不用重新编译。
-
-设计取舍和踩过的坑都在 [doc.md](doc.md)。
-
-## 自己编
-
-```bash
-swiftc -O overlay.swift -o gong-overlay
-go build -o gong ./cmd/gong
-./gong vis default
-```
-
-需要 Xcode Command Line Tools（`swiftc` 在里面，不需要完整 Xcode）和 Go。走 brew 装的话这两个都不用。
+**别直接 `brew uninstall gong`** —— formula 没有 uninstall hook，plist 会留在
+`~/Library/LaunchAgents`，之后每天到点去拉一个不存在的二进制，而且是静默失败。
+`gong uninstall` 会先清 plist、从 launchd 撤出，最后自动帮你跑 `brew uninstall`。
