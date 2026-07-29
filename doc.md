@@ -211,7 +211,7 @@ gong uninstall            # 一条龙卸干净，最后自动 exec 到 brew unin
 具体改动：
 
 - `config.Schedule.Label string`，无校验；`Validate()` 不再检查名字非空/唯一/字符集
-- `Schedule.DisplayName(i int) string`——有标签用标签，没有就是 `"#" + (i+1)`，所有面向用户的消息（删除确认、主题解析失败告警、`gong on` 装完的摘要）统一走这个
+- `Schedule.Ref(i int) string`——有标签用标签，没有就是 `"#" + (i+1)`，所有面向用户的消息（删除确认、主题解析失败告警、`gong on` 装完的摘要）统一走这个
 - `config.Config.At(i)` / `RemoveAt(i)` 按位置存取，取代原来按名字查找的 `Find`/`Remove`
 - `gong fire` 那条「带名字调用只为兼容 0.1.0」的分支整个删掉了：Name 已经不存在，任何位置参数一律忽略、永远按时间反查——旧 plist 传进来的参数变成噪音，反查本来就能算出同一个绝对目标时刻，效果等价
 - `agent.SyncResult.Active` 从 `[]string`（名字）改成 `[]agent.ActiveSchedule{Index, Schedule}`——它是 `Sync()` 内部过滤（只留启用且主题有效的）之后的子集，下标从 0 重新数，跟原始位置对不上，所以必须把原始 `Index` 一起带出来，不能只传 `config.Schedule` 指望调用方自己算——这个坑在写 `install()` 的打印逻辑时就地撞上了，修完才定型成现在这样
@@ -277,7 +277,7 @@ internal/tui           gong set
 |---|---|---|
 | `table` | 定时列表 | 列对齐、光标、滚动不用自己算；而且它按 `runewidth` 算宽度，中文字符正确按双宽处理——原来手写的 `%-12s` 是按 rune 数对齐，中文名字/星期会错位 |
 | `list` | 主题库（新 tab） | 自带 `/` 模糊搜索、分页、状态栏；主题多了之后靠名字翻已经不够用 |
-| `textinput` | 改名 | 校验和光标交给它，`Validate` 钩子做实时提示 |
+| `textinput` | 编辑标签 | 光标和编辑键位交给它；标签是自由文本，没有校验 |
 | `help` + `key.Binding` | 底部按键提示 | 按 `?` 能展开全帮助，不用手写两份文案 |
 
 新增一个 tab 切换：`定时` / `主题库`。编辑一条定时时按 `t` 能跳进主题库整个逛（带描述、带搜索），选中回车就带着选择回到编辑态，不用再靠左右键盲猜主题名循环。
@@ -299,7 +299,7 @@ internal/tui           gong set
 
 ```
 gong-overlay --at 12:00:00 --target 1753588800 --lead 5 --grace 1200 --timeout 20 \
-             --name noon \
+             --tag '#1' \
              --theme ~/.config/gong/themes/default/index.html
 ```
 
@@ -309,7 +309,11 @@ gong-overlay --at 12:00:00 --target 1753588800 --lead 5 --grace 1200 --timeout 2
 
 提醒的形式和文案完全由主题决定，不通过启动参数传。曾经有过一个 `--message`，已经删掉了——它诱导人去写「一套动画 + 十种文案」，而真正决定提醒有没有效果的是**形式本身**（倒计时、闸门砸下、绕圈的猫），不是那行字。要不同的提醒就写不同的主题，复制一份改几行 HTML 的成本本来就该很低。
 
-同理 `--name` 只用来给 stderr 打标，**不注入页面**——注进去只会诱导主题写 `if (name === 'noon')`，等于把表现逻辑漏回配置层。
+同理 `--tag` 只用来给 stderr 打标，**不注入页面**——注进去只会诱导主题写 `if (tag === '#1')`，等于把表现逻辑漏回配置层。
+
+它早先叫 `--name`，跟着「定时有名字」那版设计一起改掉了：现在定时的身份是序号，Go 传进来的是 `#1` 或 `vis`，纯粹为了在 `/tmp/gong.err` 里认出是哪次触发。
+
+`--theme` 是必填的，缺了直接以退出码 2 报错。壳不猜路径——它不读配置，也不知道内置主题装在 brew 前缀的哪个位置（那是 Go 侧 ldflags 和回落逻辑的事）。曾经有过一段「缺 `--theme` 就试 `~/.config/gong/themes/default/index.html`」的兜底，既写死了一个主题名，又只猜用户目录，brew 装的内置主题根本不在那儿，结果是把「参数没传」换成了一条更难懂的 `theme not found`。
 
 ### lead：launchd 没有秒
 
@@ -579,7 +583,7 @@ swiftc -O overlay.swift -o gong-overlay
 
 ./gong-overlay --force --theme themes/default/index.html
 ./gong-overlay --at 12:00:00 --lead 0 --grace 1200 --timeout 20 \
-               --name noon --theme themes/default/index.html
+               --tag '#1' --theme themes/default/index.html
 ```
 
 ### 主题两次推翻，`nixie` 已删除

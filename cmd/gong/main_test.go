@@ -31,7 +31,23 @@ func TestOverlayArgsCarryAbsoluteTarget(t *testing.T) {
 	t.Fatal("overlay 参数里没有 --target")
 }
 
-// 没标签时 DisplayName 会现算出 "#N"，跟前面的序号撞车——这是默认路径，不是边角。
+// 壳把认不出来的 flag 当致命错误（退出码 2），所以 Go 侧写错 flag 名不是
+// 「少个日志前缀」而是浮层完全不出现。--name 是改名前的旧拼法，防它复活。
+func TestOverlayArgsUseTagNotName(t *testing.T) {
+	s := config.Schedule{At: "12:00:00", Grace: 1200}
+	th := theme.Theme{HTML: "/tmp/themes/fake/index.html"}
+	args := overlayArgs("/tmp/gong-overlay", s, th, time.Now(), "#1")
+
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--name") {
+		t.Errorf("overlay 参数里还有 --name：%s", joined)
+	}
+	if !strings.Contains(joined, "--tag #1") {
+		t.Errorf("overlay 参数里没有 --tag #1：%s", joined)
+	}
+}
+
+// 没标签时 Ref 会现算出 "#N"，跟前面的序号撞车——这是默认路径，不是边角。
 func TestRmPreviewDoesNotRepeatIndex(t *testing.T) {
 	s := config.Schedule{At: "12:00:00", Weekdays: []int{1}, Theme: "default"}
 	got := rmPreview(2, s)

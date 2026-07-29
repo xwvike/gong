@@ -125,7 +125,7 @@ func TestAddAppendsScheduleWithoutRequiringLabel(t *testing.T) {
 	}
 }
 
-func TestRenameSetsLabel(t *testing.T) {
+func TestEditLabelSetsLabel(t *testing.T) {
 	c := twoSchedules()
 	tm := startModel(t, c)
 
@@ -147,7 +147,7 @@ func TestRenameSetsLabel(t *testing.T) {
 }
 
 // 标签是纯装饰：带空格、跟别的定时重复、留空，一律合法，不该被拒。
-func TestRenameAllowsAnyLabelIncludingDuplicatesAndSpaces(t *testing.T) {
+func TestEditLabelAllowsAnyLabelIncludingDuplicatesAndSpaces(t *testing.T) {
 	c := twoSchedules()
 	tm := startModel(t, c)
 
@@ -166,7 +166,7 @@ func TestRenameAllowsAnyLabelIncludingDuplicatesAndSpaces(t *testing.T) {
 }
 
 // 提交空标签等于清空——标签本来就不是必填项。
-func TestRenameToEmptyClearsLabel(t *testing.T) {
+func TestEditLabelToEmptyClearsLabel(t *testing.T) {
 	c := twoSchedules()
 	tm := startModel(t, c)
 
@@ -318,8 +318,8 @@ func TestDeleteRenumbersRemaining(t *testing.T) {
 	if len(c.Schedules) != 1 {
 		t.Fatalf("应该只剩 1 条，现在 %d 条", len(c.Schedules))
 	}
-	if got := c.Schedules[0].DisplayName(0); got != "evening" {
-		t.Errorf("剩下的那条应该在位置 0，DisplayName = %q", got)
+	if got := c.Schedules[0].Ref(0); got != "evening" {
+		t.Errorf("剩下的那条应该在位置 0，Ref = %q", got)
 	}
 }
 
@@ -362,5 +362,42 @@ func TestSaveFailsValidationWithoutQuitting(t *testing.T) {
 	finalModel(t, tm)
 	if c.Schedules[0].Enabled {
 		t.Fatal("校验失败后程序应该还在运行；如果它已经退出，这次 toggle 不会生效")
+	}
+}
+
+// 新建定时预选哪个主题。之前直接取 m.themes[0]，而 theme.List() 是按 ID
+// 字母序排的——用户往 ~/.config/gong/themes 丢一个叫 "aaa" 的主题，新建定时
+// 就悄悄改用它了。fakeThemes 的字母序第一个是 alpha，正好能逮住这个回归。
+func TestAddUsesDefaultThemeNotAlphabeticalFirst(t *testing.T) {
+	withDefault := append(fakeThemes(), theme.Theme{
+		ID: config.DefaultTheme, HTML: "/dev/null",
+		Meta: theme.Meta{Name: "内置", Duration: 5},
+	})
+	c := twoSchedules()
+
+	// 走真实的 "a" 按键路径，不是只测 defaultThemeID() 本身——回归发生在
+	// 调用点（那里曾经写死 m.themes[0]），只测辅助函数是逮不住的。
+	tm := teatest.NewTestModel(t, newModel(c, withDefault),
+		teatest.WithInitialTermSize(100, 32))
+	t.Cleanup(func() { _ = tm.Quit() })
+	waitForRender(t, tm)
+	tm.Send(runes("a"))
+	finalModel(t, tm)
+
+	if len(c.Schedules) != 3 {
+		t.Fatalf("应该新增一条，现在有 %d 条", len(c.Schedules))
+	}
+	if got := c.Schedules[2].Theme; got != config.DefaultTheme {
+		t.Errorf("新定时的主题 = %q，想要 %q（alpha 说明又回到了按字母序取第一个）",
+			got, config.DefaultTheme)
+	}
+}
+
+// 内置目录整个没装好时 default 解析不开，这时候必须还能建出定时来，
+// 不能因为拿不到 default 就崩或者留个空主题。
+func TestDefaultThemeIDFallsBackWhenDefaultMissing(t *testing.T) {
+	m := newModel(twoSchedules(), fakeThemes()) // 里面没有 default
+	if got := m.defaultThemeID(); got != "alpha" {
+		t.Errorf("没有 default 时该回落到列表第一个，得到 %q", got)
 	}
 }

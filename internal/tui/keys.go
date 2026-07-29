@@ -10,12 +10,13 @@ type keyMap struct {
 	Help    key.Binding
 	TabNext key.Binding
 
-	Toggle  key.Binding
-	Add     key.Binding
-	Delete  key.Binding
-	Edit    key.Binding
-	Rename  key.Binding
-	Preview key.Binding
+	Toggle key.Binding
+	Add    key.Binding
+	Delete key.Binding
+	Edit   key.Binding
+	// EditLabel 编辑的是那条可选的装饰性标签，不是身份——身份永远是序号。
+	EditLabel key.Binding
+	Preview   key.Binding
 
 	FieldLeft  key.Binding
 	FieldRight key.Binding
@@ -35,12 +36,12 @@ func newKeyMap() keyMap {
 		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "展开帮助")),
 		TabNext: key.NewBinding(key.WithKeys("tab", "shift+tab"), key.WithHelp("tab", "切换 定时/主题")),
 
-		Toggle:  key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "启停")),
-		Add:     key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "新增")),
-		Delete:  key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "删除")),
-		Edit:    key.NewBinding(key.WithKeys("e", "enter"), key.WithHelp("enter", "编辑")),
-		Rename:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "改名")),
-		Preview: key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "预览")),
+		Toggle:    key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "启停")),
+		Add:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "新增")),
+		Delete:    key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "删除")),
+		Edit:      key.NewBinding(key.WithKeys("e", "enter"), key.WithHelp("enter", "编辑")),
+		EditLabel: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "设标签")),
+		Preview:   key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "预览")),
 
 		FieldLeft:  key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/→", "选字段")),
 		FieldRight: key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("", "")),

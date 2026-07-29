@@ -32,12 +32,12 @@ func (m Model) View() string {
 		b.WriteString(m.renderEditPanel() + "\n")
 	}
 
-	if m.mode == modeRename {
+	if m.mode == modeLabel {
 		b.WriteString("\n  " + m.input.View() + "\n")
 	}
 	if m.mode == modeConfirmDelete {
 		if s := m.selected(); s != nil {
-			b.WriteString("\n  " + styleErr.Render("删掉 "+s.DisplayName(m.table.Cursor())+"？") +
+			b.WriteString("\n  " + styleErr.Render("删掉 "+s.Ref(m.table.Cursor())+"？") +
 				styleDim.Render("  y 确认 · 其他键取消") + "\n")
 		}
 	}
@@ -65,7 +65,7 @@ func (m Model) renderTabs() string {
 		parts = append(parts, style.Render(l))
 	}
 	if m.pickingTheme {
-		s := m.selected().DisplayName(m.table.Cursor())
+		s := m.selected().Ref(m.table.Cursor())
 		parts = append(parts, styleDim.Render("  ← 正在为 "+s+" 选主题，enter 确定 · esc 取消"))
 	}
 	return " " + strings.Join(parts, " ")
@@ -75,7 +75,7 @@ func (m Model) brokenThemeWarnings() []string {
 	var warnings []string
 	for i, s := range m.cfg.Schedules {
 		if _, err := theme.Resolve(s.Theme); err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s 的主题 %q 找不到", s.DisplayName(i), s.Theme))
+			warnings = append(warnings, fmt.Sprintf("%s 的主题 %q 找不到", s.Ref(i), s.Theme))
 		}
 	}
 	return warnings
@@ -168,13 +168,13 @@ func (m Model) renderWeek(s config.Schedule) string {
 func (m Model) currentHelp() contextHelp {
 	k := m.keys
 	switch {
-	case m.mode == modeRename:
+	case m.mode == modeLabel:
 		return short(k.Confirm, k.Cancel)
 	case m.mode == modeConfirmDelete:
 		return short(k.Confirm, k.Cancel)
 	case m.tab == tabSchedules && m.mode == modeEdit:
 		return full(
-			[]key.Binding{k.FieldLeft, k.ValueUp, k.PickTheme, k.Rename, k.Preview, k.Back},
+			[]key.Binding{k.FieldLeft, k.ValueUp, k.PickTheme, k.EditLabel, k.Preview, k.Back},
 			[]key.Binding{k.Save, k.Quit, k.Help},
 		)
 	case m.tab == tabThemes:
@@ -187,7 +187,7 @@ func (m Model) currentHelp() contextHelp {
 		)
 	default:
 		return full(
-			[]key.Binding{k.Toggle, k.Edit, k.Add, k.Delete, k.Rename, k.Preview, k.TabNext},
+			[]key.Binding{k.Toggle, k.Edit, k.Add, k.Delete, k.EditLabel, k.Preview, k.TabNext},
 			[]key.Binding{k.Save, k.Quit, k.Help},
 		)
 	}

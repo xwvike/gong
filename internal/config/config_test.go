@@ -161,7 +161,7 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 
 // 0.1.x 的配置文件里有 name 字段，没有 label。TOML 解码器会安静地
 // 忽略未知字段，Label 落回空字符串——不该报错，也不该崩，纯粹降级成
-// 一条没有标签的定时（DisplayName 会现算出 "#1"）。
+// 一条没有标签的定时（Ref 会现算出 "#1"）。
 func TestLoadIgnoresLegacyNameField(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
@@ -187,8 +187,8 @@ grace = 1200
 	if got := c.Schedules[0].Label; got != "" {
 		t.Errorf("旧版 name 字段不该被误读成 Label，got %q", got)
 	}
-	if got := c.Schedules[0].DisplayName(0); got != "#1" {
-		t.Errorf("没标签时 DisplayName = %q，想要 #1", got)
+	if got := c.Schedules[0].Ref(0); got != "#1" {
+		t.Errorf("没标签时 Ref = %q，想要 #1", got)
 	}
 }
 
@@ -269,12 +269,12 @@ func TestAtAndRemoveAtAreIndexBased(t *testing.T) {
 
 func TestDisplayNameFallsBackToIndex(t *testing.T) {
 	s := Schedule{}
-	if got := s.DisplayName(0); got != "#1" {
-		t.Errorf("DisplayName(0) 空标签 = %q，想要 #1", got)
+	if got := s.Ref(0); got != "#1" {
+		t.Errorf("Ref(0) 空标签 = %q，想要 #1", got)
 	}
 	s.Label = "午间"
-	if got := s.DisplayName(0); got != "午间" {
-		t.Errorf("DisplayName(0) 有标签 = %q，想要 午间", got)
+	if got := s.Ref(0); got != "午间" {
+		t.Errorf("Ref(0) 有标签 = %q，想要 午间", got)
 	}
 }
 

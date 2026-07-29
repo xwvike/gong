@@ -3,7 +3,7 @@
 // 组件选型：
 //   - bubbles/table   定时列表——列对齐、光标、滚动都不用自己算
 //   - bubbles/list    主题库——自带 "/" 模糊搜索、分页、状态栏
-//   - bubbles/textinput 改名——校验和光标都交给它
+//   - bubbles/textinput 编辑标签——光标和编辑键位都交给它
 //   - bubbles/help    底部按键提示——按 ? 能展开全部，不用手写两份文案
 //
 // 时间和星期两个字段依然是方向键调，不给文本框：
@@ -41,7 +41,7 @@ type mode int
 const (
 	modeList mode = iota
 	modeEdit
-	modeRename
+	modeLabel
 	modeConfirmDelete
 )
 
@@ -80,7 +80,7 @@ type Model struct {
 	input textinput.Model
 
 	field        field
-	returnMode   mode // 从 modeList/modeEdit 进 modeRename 前记一下，改完好回原地
+	labelReturn  mode // 从 modeList/modeEdit 进 modeLabel 前记一下，改完好回原地
 	pickingTheme bool // true：当前在主题库是为了给正在编辑的定时选主题，不是随便逛
 
 	width, height int
@@ -115,7 +115,7 @@ func newModel(c *config.Config, themes []theme.Theme) Model {
 		help:   help.New(),
 		table:  newScheduleTable(),
 		list:   newThemeList(themes),
-		input:  newRenameInput(),
+		input:  newLabelInput(),
 	}
 	m.refreshTable()
 	return m
@@ -172,9 +172,9 @@ func newThemeList(themes []theme.Theme) list.Model {
 	return l
 }
 
-// newRenameInput 编辑的是标签，不是身份——不必挡任何字符，留空也完全合法
+// newLabelInput 编辑的是标签，不是身份——不必挡任何字符，留空也完全合法
 // （等于不要标签，回落显示 "#N"），所以没有 Validate。
-func newRenameInput() textinput.Model {
+func newLabelInput() textinput.Model {
 	ti := textinput.New()
 	ti.Prompt = "标签 › "
 	ti.CharLimit = 40
@@ -194,7 +194,7 @@ func (m *Model) selected() *config.Schedule {
 }
 
 // refreshTable 把 cfg.Schedules 重新铺进表格，尽量保住光标位置。
-// 结构性改动（增删改名）之后都要调一次，否则表格和配置会对不上。
+// 结构性改动（增删定时、改标签）之后都要调一次，否则表格和配置会对不上。
 func (m *Model) refreshTable() {
 	rows := make([]table.Row, 0, len(m.cfg.Schedules))
 	for i, s := range m.cfg.Schedules {
@@ -290,8 +290,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
-	case modeRename:
-		return m.updateRename(msg)
+	case modeLabel:
+		return m.updateLabel(msg)
 	case modeConfirmDelete:
 		return m.updateConfirm(msg)
 	}
@@ -304,7 +304,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// 全局键：退出、保存、帮助——任何浏览态下都认，编辑/改名/确认删除已在上面拦掉。
+	// 全局键：退出、保存、帮助——任何浏览态下都认，编辑/改标签/确认删除已在上面拦掉。
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m.handleQuit()
@@ -379,10 +379,10 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Add):
-		// 不用取名字、不用管重不重复——新的一条排在最后，序号自己就是 #N。
+		// 不用取标签、不用管重不重复——新的一条排在最后，序号自己就是 #N。
 		m.cfg.Schedules = append(m.cfg.Schedules, config.Schedule{
 			At: "12:00:00", Weekdays: []int{1, 2, 3, 4, 5},
-			Theme: m.themes[0].ID, Enabled: true, Grace: config.DefaultGrace,
+			Theme: m.defaultThemeID(), Enabled: true, Grace: config.DefaultGrace,
 		})
 		m.changed = true
 		m.refreshTable()
@@ -400,10 +400,10 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key.Matches(msg, m.keys.Rename):
+	case key.Matches(msg, m.keys.EditLabel):
 		if s := m.selected(); s != nil {
-			m.returnMode = modeList
-			m.mode = modeRename
+			m.labelReturn = modeList
+			m.mode = modeLabel
 			m.input.SetValue(s.Label)
 			m.input.CursorEnd()
 			return m, m.input.Focus()
@@ -431,9 +431,9 @@ func (m Model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeList
 		m.resize(m.width, m.height)
 		return m, nil
-	case key.Matches(msg, m.keys.Rename):
-		m.returnMode = modeEdit
-		m.mode = modeRename
+	case key.Matches(msg, m.keys.EditLabel):
+		m.labelReturn = modeEdit
+		m.mode = modeLabel
 		m.input.SetValue(s.Label)
 		m.input.CursorEnd()
 		return m, m.input.Focus()
@@ -506,6 +506,21 @@ func (m *Model) bump(s *config.Schedule, dir int) {
 	m.refreshTable()
 }
 
+// defaultThemeID 新建定时时预选哪个主题。
+//
+// 优先 config.DefaultTheme，找不到才回落到列表第一个。之前直接用
+// m.themes[0]，而 theme.List() 是按 ID 字母序排的——用户往
+// ~/.config/gong/themes 里丢一个叫 "aaa" 的主题，新建定时就悄悄改用它了。
+// 回落分支必须留着：内置目录整个丢了的时候 default 也解析不开。
+func (m *Model) defaultThemeID() string {
+	for _, t := range m.themes {
+		if t.ID == config.DefaultTheme {
+			return t.ID
+		}
+	}
+	return m.themes[0].ID
+}
+
 func (m *Model) themeIndexOf(id string) int {
 	for i, t := range m.themes {
 		if t.ID == id {
@@ -517,9 +532,9 @@ func (m *Model) themeIndexOf(id string) int {
 
 func wrap(v, n int) int { return ((v % n) + n) % n }
 
-// updateRename 编辑的是可选标签，没有任何值需要拒绝——留空就是不要标签，
+// updateLabel 编辑的是可选标签，没有任何值需要拒绝——留空就是不要标签，
 // 跟别的定时重字也无所谓。没有校验分支，所以也不用「留在原地重试」那一套。
-func (m Model) updateRename(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) updateLabel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
 		if s := m.selected(); s != nil {
@@ -530,12 +545,12 @@ func (m Model) updateRename(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.input.Blur()
-		m.mode = m.returnMode
+		m.mode = m.labelReturn
 		m.refreshTable()
 		return m, nil
 	case tea.KeyEsc:
 		m.input.Blur()
-		m.mode = m.returnMode
+		m.mode = m.labelReturn
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -547,7 +562,7 @@ func (m Model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "y" || msg.String() == "Y" {
 		i := m.table.Cursor()
 		if s := m.selected(); s != nil {
-			m.status = "已删除 " + s.DisplayName(i) + "（保存后生效）"
+			m.status = "已删除 " + s.Ref(i) + "（保存后生效）"
 			m.isErr = false
 			m.cfg.Schedules = append(m.cfg.Schedules[:i], m.cfg.Schedules[i+1:]...)
 			m.changed = true
@@ -617,7 +632,7 @@ func (m Model) previewTheme(th theme.Theme) (string, bool) {
 	cmd := exec.Command(overlay, "--force",
 		"--lead", fmt.Sprint(th.LeadSeconds()),
 		"--timeout", fmt.Sprint(th.TimeoutSeconds()),
-		"--name", "vis", "--theme", th.HTML)
+		"--tag", "vis", "--theme", th.HTML)
 	if err := cmd.Start(); err != nil {
 		return err.Error(), true
 	}

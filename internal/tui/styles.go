@@ -2,8 +2,11 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// 调色板跟主题里那个琥珀色一脉相承（themes/default 的 --amber #F2C14E），
-// 整个项目就这一处强调色，TUI 没理由另起一套。
+// TUI 自己的调色板，刻意不跟任何主题挂钩。
+//
+// 主题是可增可删的外部资源，TUI 是宿主——从某个具体主题里取色，
+// 那个主题被删或改配色之后这里就成了悬空引用（上一版注释就指着一个
+// 已经不存在的 --amber 变量）。琥珀是 gong 自己的强调色，仅此而已。
 var (
 	colAmber = lipgloss.Color("214")
 	colDim   = lipgloss.Color("240")

@@ -34,6 +34,17 @@ type Schedule struct {
 
 const DefaultGrace = 1200
 
+// DefaultTheme 是 Go 唯一硬依赖的主题名。
+//
+// 主题体系本身是纯目录扫描的，增删主题不需要改任何 Go/Swift 代码——
+// 唯独「没得选的时候选谁」需要一个字面量兜底。把它收在这一个常量里，
+// 就是为了让这份依赖是显式的、可数的：全项目只有这里知道 "default"
+// 这个名字，别处一律走 theme.List() / theme.Resolve()。
+//
+// 注意它不保证存在：内置目录被删或没装好时 Resolve 会失败，
+// 调用方按「主题找不到」降级处理，不要假设这个名字一定解析得开。
+const DefaultTheme = "default"
+
 // Default 是 gong on 在没有配置时写下的东西。
 // 两条都给了标签只是做个示范——标签不是必须的，序号本身就够用。
 func Default() *Config {
@@ -41,9 +52,9 @@ func Default() *Config {
 		Version: 1,
 		Schedules: []Schedule{
 			{Label: "午间", At: "12:00:00", Weekdays: []int{1, 2, 3, 4, 5},
-				Theme: "default", Enabled: true, Grace: DefaultGrace},
+				Theme: DefaultTheme, Enabled: true, Grace: DefaultGrace},
 			{Label: "下班", At: "18:00:00", Weekdays: []int{1, 2, 3, 4, 5},
-				Theme: "default", Enabled: true, Grace: DefaultGrace},
+				Theme: DefaultTheme, Enabled: true, Grace: DefaultGrace},
 		},
 	}
 }
@@ -123,8 +134,8 @@ func (c *Config) RemoveAt(i int) bool {
 	return true
 }
 
-// DisplayName 是消息里指代一条定时的统一写法：有标签用标签，没有就用序号。
-func (s Schedule) DisplayName(index int) string {
+// Ref 是消息里指代一条定时的统一写法：有标签用标签，没有就用序号。
+func (s Schedule) Ref(index int) string {
 	if s.Label != "" {
 		return s.Label
 	}
@@ -199,32 +210,32 @@ func (s Schedule) WeekdaysLabel() string {
 //
 // 注意这里不再检查「名字」——标签是可选的自由文本，没有唯一性要求，
 // 也没有字符限制，因为它不再拼进 launchd label 或文件名。出错信息里
-// 用 DisplayName(i) 指代第 i 条，标签留空时自动落回 "#序号"。
+// 用 Ref(i) 指代第 i 条，标签留空时自动落回 "#序号"。
 func (c *Config) Validate() error {
 	if c == nil {
 		return fmt.Errorf("配置不能为空")
 	}
 	for i, s := range c.Schedules {
-		name := s.DisplayName(i)
+		ref := s.Ref(i)
 		if _, err := ParseClock(s.At); err != nil {
-			return fmt.Errorf("定时 %s：%w", name, err)
+			return fmt.Errorf("定时 %s：%w", ref, err)
 		}
 		if len(s.Weekdays) == 0 {
-			return fmt.Errorf("定时 %s 一个星期几都没选", name)
+			return fmt.Errorf("定时 %s 一个星期几都没选", ref)
 		}
 		for _, d := range s.Weekdays {
 			if d < 0 || d > 7 {
-				return fmt.Errorf("定时 %s：星期几必须是 0 到 7，收到 %d", name, d)
+				return fmt.Errorf("定时 %s：星期几必须是 0 到 7，收到 %d", ref, d)
 			}
 		}
 		if s.Theme == "" {
-			return fmt.Errorf("定时 %s 没有主题", name)
+			return fmt.Errorf("定时 %s 没有主题", ref)
 		}
 		if s.Theme == "." || s.Theme == ".." || strings.ContainsAny(s.Theme, `/\\`) {
-			return fmt.Errorf("定时 %s：主题名不能含路径分隔符", name)
+			return fmt.Errorf("定时 %s：主题名不能含路径分隔符", ref)
 		}
 		if s.Grace < 0 {
-			return fmt.Errorf("定时 %s：grace 不能是负数", name)
+			return fmt.Errorf("定时 %s：grace 不能是负数", ref)
 		}
 	}
 	return nil

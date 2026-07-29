@@ -50,7 +50,9 @@ struct Options {
     var lead = 0
     var grace = 1200            // 秒。超出这个窗口就不放（防止睡醒后 launchd 补播）
     var timeout = 20.0          // 主题不喊 done 时的可见兜底
-    var name = ""               // 只用来给 stderr 打标，不注入页面
+    // 只用来给 stderr 打标，不注入页面。刻意不叫 name：定时没有名字这回事，
+    // Go 侧传进来的是「#序号」或 "vis"，纯粹为了在日志里认出是哪次触发。
+    var tag = ""
     var theme = ""
     var force = false           // 跳过时间窗和全屏判断，gong vis 预览走这条
     var invalid = false
@@ -120,11 +122,11 @@ func parseArgs() -> Options {
             } else {
                 reportInvalid("invalid --timeout")
             }
-        case "--name":
+        case "--tag":
             if let value = next() {
-                o.name = value
+                o.tag = value
             } else {
-                reportInvalid("missing --name value")
+                reportInvalid("missing --tag value")
             }
         case "--theme":
             if let value = next() {
@@ -342,8 +344,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
 
     /// 注入契约。壳只给【时间】和【几何】，提醒长什么样、说什么全归主题。
-    /// 刻意不注入 name/message 之类的内容参数——那会诱导主题去按定时名分支，
+    /// 刻意不注入标签/文案之类的内容参数——那会诱导主题去按某条定时分支，
     /// 等于把表现逻辑漏回配置层。要不同的提醒形式就写不同的主题。
+    /// （--tag 只进 stderr，不进这里。）
     private func bootstrapJS(screen: NSScreen, index: Int, total: Int,
                              isMain: Bool, primary: Bool,
                              target: Date, now: Date) -> String {
@@ -530,8 +533,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
 
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         guard m.name == "done" else {
-            let tag = opts.name.isEmpty ? "" : "[\(opts.name)]"
-            FileHandle.standardError.write("gong-overlay\(tag)[js] \(m.body)\n".data(using: .utf8)!)
+            let mark = opts.tag.isEmpty ? "" : "[\(opts.tag)]"
+            FileHandle.standardError.write("gong-overlay\(mark)[js] \(m.body)\n".data(using: .utf8)!)
             return
         }
         guard !finished, m.frameInfo.isMainFrame,

@@ -142,7 +142,7 @@ func install(c *config.Config) error {
 		s := a.Schedule
 		tr := agent.TriggerFor(s)
 		fmt.Printf("%-6s %s %s  主题 %-8s (launchd 在 %02d:%02d 叫醒)\n",
-			s.DisplayName(a.Index), s.At, s.WeekdaysLabel(), s.Theme, tr.Hour, tr.Minute)
+			s.Ref(a.Index), s.At, s.WeekdaysLabel(), s.Theme, tr.Hour, tr.Minute)
 	}
 	for _, e := range res.Errors {
 		fmt.Fprintln(os.Stderr, "  !", e)
@@ -413,7 +413,7 @@ func cmdRm(args []string) error {
 		return nil
 	}
 
-	display := s.DisplayName(n - 1)
+	display := s.Ref(n - 1)
 	if !c.RemoveAt(n - 1) {
 		return fmt.Errorf("没有第 %d 条定时", n)
 	}
@@ -427,11 +427,10 @@ func cmdRm(args []string) error {
 
 // rmPreview 是删除前给人确认的那一行。
 //
-// 序号自己打，不走 DisplayName：标签是可选的，大多数定时根本没有，而
-// DisplayName 在没标签时正好回落成 "#N"——前面再拼一个 #%d 就成了
-// 「即将删除：#2 #2 12:00:00」，序号打两遍。有标签才把它补在后面。
-// 抽成函数纯粹是为了能测：cmdRm 走完确认之后一定会调 install()，
-// 那会真的碰 launchctl，整条路径没法进 go test。
+// 序号自己打，不走 Ref：标签是可选的，大多数定时根本没有，而 Ref 在没标签时
+// 正好回落成 "#N"——前面再拼一个 #%d 就成了「即将删除：#2 #2 12:00:00」，
+// 序号打两遍。有标签才把它补在后面。抽成函数纯粹是为了能测：cmdRm 走完确认
+// 之后一定会调 install()，那会真的碰 launchctl，整条路径没法进 go test。
 func rmPreview(n int, s config.Schedule) string {
 	line := fmt.Sprintf("即将删除：#%d %s %s  主题 %s", n, s.At, s.WeekdaysLabel(), s.Theme)
 	if s.Label != "" {
@@ -473,7 +472,7 @@ func cmdVis(args []string) error {
 		"--force",
 		"--lead", strconv.Itoa(th.LeadSeconds()),
 		"--timeout", strconv.Itoa(th.TimeoutSeconds()),
-		"--name", "vis",
+		"--tag", "vis",
 		"--theme", th.HTML,
 	)
 	cmd.Stderr = os.Stderr
@@ -519,7 +518,7 @@ func cmdFire(_ []string) error {
 		return nil // 停用了就安静退出，不该是错误
 	}
 	if target.IsZero() {
-		return fmt.Errorf("无法计算定时 %s 的目标时刻", s.DisplayName(match.Index))
+		return fmt.Errorf("无法计算定时 %s 的目标时刻", s.Ref(match.Index))
 	}
 	th, err := theme.Resolve(s.Theme)
 	if err != nil {
@@ -532,7 +531,7 @@ func cmdFire(_ []string) error {
 
 	// TODO 收摊动作在这里跑，跑完再 exec 到壳
 
-	// --name 只用来给壳的 stderr 打标，不是身份——用序号就够，
+	// --tag 只用来给壳的 stderr 打标，不是身份——用序号就够，
 	// 不必依赖一个现在已经不强制存在的标签。
 	argv := overlayArgs(overlay, *s, th, target, fmt.Sprintf("#%d", match.Index+1))
 	return syscall.Exec(overlay, argv, os.Environ())
@@ -547,7 +546,7 @@ func overlayArgs(overlay string, s config.Schedule, th theme.Theme, target time.
 		"--lead", strconv.Itoa(th.LeadSeconds()),
 		"--grace", strconv.Itoa(s.Grace),
 		"--timeout", strconv.Itoa(th.TimeoutSeconds()),
-		"--name", tag,
+		"--tag", tag,
 		"--theme", th.HTML,
 	}
 }

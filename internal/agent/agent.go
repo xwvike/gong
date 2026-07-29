@@ -309,7 +309,7 @@ func Kickstart() error {
 
 // ActiveSchedule 是一条被装进 plist 的定时，连它在 c.Schedules 里的
 // 真实位置一起带出来——Active 只收启用且主题有效的子集，下标从 0 重新数，
-// 跟原始位置对不上，所以不能只传 config.Schedule，DisplayName(i) 会算错。
+// 跟原始位置对不上，所以不能只传 config.Schedule，Ref(i) 会算错。
 type ActiveSchedule struct {
 	Index    int
 	Schedule config.Schedule
@@ -354,7 +354,7 @@ func Sync(c *config.Config, gongPath string) SyncResult {
 			continue
 		}
 		if _, err := theme.Resolve(s.Theme); err != nil {
-			res.Errors = append(res.Errors, fmt.Errorf("定时 %s：%w", s.DisplayName(i), err))
+			res.Errors = append(res.Errors, fmt.Errorf("定时 %s：%w", s.Ref(i), err))
 			continue
 		}
 		res.Active = append(res.Active, ActiveSchedule{Index: i, Schedule: s})
