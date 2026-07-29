@@ -69,23 +69,22 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`gong —— 到点在所有屏幕最顶层播一段动画，不抢焦点、不吃点击
+	fmt.Print(`gong —— I'm outta here!
 
-  gong on            写默认配置并接管 launchd（装完跑这一条就能用）
-  gong set           TUI：增删改查定时、选主题、预览
-  gong ls            列出定时和它们的实际状态（前面的编号就是 rm 用的那个）
-  gong rm <序号>     删掉一条定时，序号看 gong ls（会先问一遍，加 -y 跳过确认）
+  gong on            启用 gong，让它提醒你该溜了！
+  gong set           进入定时器管理
+  gong ls            列出现有定时
+  gong rm <序号>     删掉一条定时
   gong vis <theme>   预览一个主题
   gong stop          掐掉正在播的浮层
   gong themes        列出可用主题
 
-  gong off           从 launchd 撤出，但保留配置和程序（想暂停一阵子用这个）
-  gong uninstall     一条龙卸干净：清 plist、清配置、最后自动跑 brew uninstall
-      --purge        连 ~/.config/gong 一起删（含你自己写的主题）
+  gong off           关掉 gong，但保留配置和程序（想暂停一阵子用这个）
+  gong uninstall     卸载 gong，并清掉 launchd 里的残留
+      --purge        连 ~/.config/gong 一起删（包含自己写的主题）
       -y             不用确认
 
-默认两条：#1 12:00（午间）、#2 18:00（下班），周一到周五。
-定时不需要起名字——标签是可选的，纯装饰，留空就用编号。
+默认定时：#1 12:00（午间）、#2 18:00（下班），周一到周五。
 `)
 }
 
