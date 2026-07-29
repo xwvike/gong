@@ -28,34 +28,50 @@
   }
 
   /* 每个词一个独立元素，绝对定位铺满整屏、居中。
-     字号跟视口走：原组件写死 120px 是给它自己那个小预览框配的，
-     全屏浮层上按 vw 算才跟屏幕大小无关。 */
-  .word {
-    position: absolute; inset: 0;
-    display: flex; align-items: center; justify-content: center;
+     字号由 JS 按实际文字宽度算（见 fitFontSize），这里的 clamp 只是
+     JS 万一没跑起来时的兜底。 */
+  .word, #measurer {
     white-space: pre;
-    color: #FFFFFF;
     /* 原 props 指定 Inter。主题不能发外部请求，也没随包带字体文件，
        所以走系统字体——WKWebView 里 -apple-system 就是 SF Pro，
        同样是几何无衬线，大字号下的观感跟 Inter 很接近。 */
     font-family: -apple-system, "SF Pro Display", "Helvetica Neue", Inter, sans-serif;
     font-weight: 700;
-    font-size: clamp(4rem, 17vw, 20rem);
+    font-size: max(3rem, min(15vw, 42vh));
     line-height: 1em;
     letter-spacing: -0.02em;
     font-variant-numeric: tabular-nums;
-    transform: scale(.06);
+  }
+
+  /* 元素只包住文字本身，再用 translate(-50%,-50%) 居中——不要用
+     inset:0 + flex 居中那种「铺满整屏再把字摆中间」的写法。
+     两个原因：
+       1. will-change 会把它提升成独立合成层，铺满整屏意味着层的
+          backing store 是整屏大小，放大 35 倍时代价惊人；包住文字
+          之后层面积只有字那么大。
+       2. 满屏的层边界压在半透明的压暗层上，合成时边缘会透出一个
+          淡淡的矩形——实测截图里能看见。 */
+  .word {
+    position: absolute; left: 50%; top: 50%;
+    color: #FFFFFF;
+    transform: translate(-50%, -50%) scale(.06);
     opacity: 0;
     transform-origin: center center;
-    /* 提升成独立图层：放大到 35 倍时让合成器缩放位图，而不是让主线程
-       按最终尺寸重新栅格化字形。放大过程中同时在淡出，位图拉伸的模糊
+    /* 提升成独立图层：放大时让合成器缩放位图，而不是让主线程按最终
+       尺寸重新栅格化字形。放大过程中同时在淡出，位图拉伸的模糊
        看不出来，换来的是不掉帧。 */
     will-change: transform, opacity;
     transition: transform 1.2s cubic-bezier(.7, 0, .25, 1),
                 opacity   1.2s cubic-bezier(.7, 0, .25, 1);
   }
-  .word.in  { transform: scale(1); opacity: 1; }
-  .word.out { transform: scale(var(--max-scale, 35)); opacity: 0; }
+  .word.in  { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  .word.out { transform: translate(-50%, -50%) scale(var(--max-scale, 35)); opacity: 0; }
+
+  /* 只用来量文字宽度，永远不显示 */
+  #measurer {
+    position: absolute; left: -99999px; top: 0;
+    visibility: hidden; pointer-events: none;
+  }
 
   @media (prefers-reduced-motion: reduce) {
     #stage, .word { transition-duration: .01ms; }
@@ -67,12 +83,19 @@
     <div id="veil"></div>
     <div id="tunnel"></div>
   </div>
+  <div id="measurer" aria-hidden="true"></div>
 
 <script>
 (() => {
   'use strict';
 
   const g = window.gong;
+
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  function formatClock(ms) {
+    const d = new Date(ms);
+    return pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
 
   // ── 原组件的 props 在这里变成写死的配置。静态主题没有调用方，
   //    想改文案节奏就直接改这一段。 ────────────────────────────
@@ -84,32 +107,54 @@
     // duration 和 ease，所以这里就只留这两个，CSS 一比一对得上。
     enterMs: 1200,
     ease: 'cubic-bezier(.7, 0, .25, 1)',
-    // 到点之后那张牌停留多久再冲出去
-    holdMs: 1500,
+
+    // 到点之后依次放的牌。holdMs 是从这张牌【被推出去】算起、到下一张牌
+    // 进场为止的间隔，所以它必须大于 enterMs，否则上一张还没飞到位就被顶掉。
+    // 想加一张牌就往这个数组里塞一项，不用动下面的流程。
+    finale: [
+      { text: target => formatClock(target), holdMs: 1900 },
+      { text: () => 'CLOCK OUT',             holdMs: 2100 },
+    ],
+
     // 拿不到 g.lead 时倒数从几开始。正常情况下这个值直接跟着 theme.toml 的
-    // lead 走（见下面的 countFrom）——写死成 5 而 lead 被改成 10 的话，
-    // 前 5 秒就是一片什么都没有的压暗，看着像主题坏了。
-    countFromFallback: 5,
-    // 到点这一下显示什么。收到的是 g.target（这条定时的绝对目标时刻），
-    // 不是 now——显示的应该是「约定的那个点」，不是渲染到这一帧的墙上时间。
-    finalText: ms => formatClock(ms),
+    // lead 走（见下面的 countFrom）——写死成 3 而 lead 被改成 10 的话，
+    // 前 7 秒就是一片什么都没有的压暗，看着像主题坏了。
+    countFromFallback: 3,
+
+    // 字最宽占视口的多少。长文案（CLOCK OUT）按这个上限缩字号。
+    maxWidthRatio: .86,
   };
 
   const stage = document.getElementById('stage');
   const tunnel = document.getElementById('tunnel');
+  const measurer = document.getElementById('measurer');
 
-  function pad(n) { return n < 10 ? '0' + n : String(n); }
-  function formatClock(ms) {
-    const d = new Date(ms);
-    return pad(d.getHours()) + ':' + pad(d.getMinutes());
+  // ── 字号自适应 ────────────────────────────────────────────
+  //
+  // 数字只有一个字符，"CLOCK OUT" 有九个——同一个字号下后者会顶出屏幕。
+  // 原组件是靠一个隐藏的「最长文案」撑开容器宽度来回避的，那套在
+  // 全屏浮层上不适用（容器本来就是整屏）。这里改成量出文字在基准字号下
+  // 的实际宽度，再等比缩到视口允许的范围内。
+  const MEASURE_PX = 100;
+  function fitFontSize(text) {
+    // 基准字号纯按比例走，不设绝对上限——之前卡了个 288px，4K 屏上「3」
+    // 只占 4% 屏宽，小得不像个宣告。vh 那一路是给超宽屏兜底的：
+    // 5120×1440 这种比例下 15vw 会比屏幕还高。
+    const base = Math.max(48, Math.min(innerWidth * .15, innerHeight * .42));
+    measurer.style.fontSize = MEASURE_PX + 'px';
+    measurer.textContent = text;
+    const w = measurer.getBoundingClientRect().width;
+    if (!w) return base;
+    const maxPx = innerWidth * CONFIG.maxWidthRatio / (w / MEASURE_PX);
+    return Math.min(base, maxPx);
   }
 
   // ── 隧道本体 ──────────────────────────────────────────────
   //
   // 原组件用两个 slot 来回倒，每次换词都要 await 上一段动画 settle，
-  // 靠的是 hold(600ms) + duration(1.2s) 永远不重叠。gong 这边节奏是由
-  // 绝对时间定的（每整秒换一个数字），1 秒的间隔比 1.2 秒的过渡短，
-  // 两个 slot 必然撞车——一个还在飞出去就得被当成下一个词重新用。
+  // 靠的是 hold + duration 永远不重叠。gong 这边节奏是由绝对时间定的
+  // （每整秒换一个数字），1 秒的间隔比 1.2 秒的过渡短，两个 slot 必然
+  // 撞车——一个还在飞出去就得被当成下一个词重新用。
   //
   // 所以改成一个词一个节点：新词进场时只是叫上一个词开始飞出去，不等它。
   // 被打断的词就带着当前的 scale 继续往外飞（CSS 过渡本来就能从中途接管），
@@ -119,17 +164,22 @@
   const flying = [];
   let current = null;
 
+  function retire(now) {
+    if (!current) return;
+    current.el.classList.remove('in');
+    current.el.classList.add('out');
+    current.exitAt = now;
+    flying.push(current);
+    current = null;
+  }
+
   function push(text, now) {
-    if (current) {
-      current.el.classList.remove('in');
-      current.el.classList.add('out');
-      current.exitAt = now;
-      flying.push(current);
-    }
+    retire(now);
 
     const el = document.createElement('div');
     el.className = 'word';
     el.textContent = text;
+    el.style.fontSize = fitFontSize(text) + 'px';
     el.style.transitionDuration = CONFIG.enterMs + 'ms';
     el.style.transitionTimingFunction = CONFIG.ease;
     tunnel.appendChild(el);
@@ -156,30 +206,33 @@
 
   // ── 生命周期 ──────────────────────────────────────────────
   //
-  // 三条时间线全部问 g.now，不问 setTimeout：页面是提前加载好的，
+  // 所有时间线全部问 g.now，不问 setTimeout：页面是提前加载好的，
   // 亮相可能发生在加载后很久，数心跳会越数越偏。
   let revealedAt = 0;
-  let firedAt = 0;
-  let leavingAt = 0;
   let lastCount = 0;
+  let stageIdx = -1;      // finale 里当前是第几张牌
+  let stageAt = 0;        // 当前这张牌是什么时候推出去的
+  let leavingAt = 0;
   let doneSent = false;
 
   // 倒数几个数由壳注入的 lead 决定，不另写一份。lead 是 0（到点才亮相）
   // 时下面的 left < 1 会让倒数整段跳过，直接等 onFire。
   const countFrom = Math.max(1, Math.round(Number(g.lead) || CONFIG.countFromFallback));
 
-  function secondsLeft(now) {
-    return Math.ceil((g.target - now) / 1000);
-  }
-
   // 倒数显示的是「现算出来的剩余秒数」，不是「第几次心跳」。
   // 心跳抖动、页面卡顿、甚至整段掉帧，数字都还是对的。
   function tickCountdown(now) {
-    const left = secondsLeft(now);
+    const left = Math.ceil((g.target - now) / 1000);
     if (left < 1 || left > countFrom) return;
     if (left === lastCount) return;
     lastCount = left;
     push(String(left), now);
+  }
+
+  function showStage(i, now) {
+    stageIdx = i;
+    stageAt = now;
+    push(CONFIG.finale[i].text(g.target), now);
   }
 
   g.onReveal = () => {
@@ -189,32 +242,32 @@
   };
 
   g.onFire = () => {
-    if (firedAt) return;
-    firedAt = g.now;
-    push(CONFIG.finalText(g.target), g.now);
+    if (stageIdx >= 0) return;
+    showStage(0, g.now);
   };
 
   g.onTick = now => {
     if (!revealedAt) return;
     sweep(now);
 
-    if (!firedAt) {
+    if (stageIdx < 0) {           // 还没到点：跑倒数
       tickCountdown(now);
       return;
     }
-    if (!leavingAt && now - firedAt >= CONFIG.holdMs) {
-      leavingAt = now;
-      stage.style.transitionDuration = CONFIG.enterMs + 'ms';
-      if (current) {
-        current.el.classList.remove('in');
-        current.el.classList.add('out');
-        current.exitAt = now;
-        flying.push(current);
-        current = null;
+    if (!leavingAt) {             // 到点后：一张一张过牌
+      if (now - stageAt >= CONFIG.finale[stageIdx].holdMs) {
+        if (stageIdx + 1 < CONFIG.finale.length) {
+          showStage(stageIdx + 1, now);
+        } else {
+          leavingAt = now;
+          stage.style.transitionDuration = CONFIG.enterMs + 'ms';
+          retire(now);
+          stage.classList.add('leaving');
+        }
       }
-      stage.classList.add('leaving');
+      return;
     }
-    if (leavingAt && !doneSent && now - leavingAt >= CONFIG.enterMs + 150) {
+    if (!doneSent && now - leavingAt >= CONFIG.enterMs + 150) {
       doneSent = true;
       // 每块屏各跑各的，不用判断 primary——非主屏这一句会被壳注入的 gong.done 安静吃掉
       g.done();
