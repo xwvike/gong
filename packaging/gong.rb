@@ -1,7 +1,7 @@
 class Gong < Formula
-  desc "到点在所有屏幕最顶层播一段动画的定时提醒，不抢焦点、不吃点击"
+  desc "I'm outta here!"
   homepage "https://github.com/xwvike/gong"
-  version "0.1.4"
+  version "0.1.5"
   license "MIT"
 
   url "https://github.com/xwvike/gong/releases/download/v#{version}/gong-#{version}-macos-universal.tar.gz"
