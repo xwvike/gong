@@ -27,25 +27,15 @@ class Gong < Formula
     doc.install "doc.md" if File.exist?("doc.md")
   end
 
+  # caveats 是唯一会打到用户终端上的东西，只留「不说会出事」的两条：
+  # 不跑 gong on 等于没装；直接 brew uninstall 会留下静默失败的 plist。
+  # 默认定时、子命令、主题这些跑一次 gong 就全列出来了，不必在这里重说一遍。
   def caveats
     <<~EOS
-      装完还差一步——把定时交给 launchd：
+      装完还差一步，把定时交给 launchd：  gong on
 
-        gong on
-
-      默认两条：#1 12:00（午间）、#2 18:00（下班），周一到周五。
-      定时不用起名字——标签是可选的，纯装饰，留空就用编号。
-      要增删改查、换主题、预览，跑 gong set。
-
-      卸载走这条，别直接 brew uninstall：
-
-        gong uninstall
-
-      它会先清 plist、从 launchd 撤出，最后自动帮你跑 brew uninstall。
-      formula 没有 uninstall hook，直接 brew uninstall 会把 plist 留在
-      ~/Library/LaunchAgents，每天到点去拉一个不存在的二进制，静默失败。
-
-      只想暂停：gong off
+      卸载用 gong uninstall，别直接 brew uninstall——formula 没有 uninstall
+      hook，plist 会留在 ~/Library/LaunchAgents 每天到点静默失败。
     EOS
   end
 
