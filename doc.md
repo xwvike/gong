@@ -96,6 +96,27 @@ release sha256 独立复核一致 → brew 装完 **没有 com.apple.quarantine*
 
 但要注意：把动画收到容器上只是**减轻**，不是根治——收完之后仍然随机见过整轮定时器不来（同一份主题连续两次跑满 40s / 48s）。根治办法是主题里干脆不用 JS 定时器，改由壳喂心跳，见第七节「时间归壳，像素归主题」。
 
+### 页面里没有可用的自有时钟（上面那条的真正原因）
+
+上面把定时器失灵归因于「重绘压力把主线程压死」。写 `noise` 主题时插桩量了一次，发现真正的原因是**遮挡节流**，而且比想象彻底。同一次运行里三个时钟并排计数，5 秒的观测窗口：
+
+| 时钟 | 期望次数 | 实测次数 |
+|---|---|---|
+| `requestAnimationFrame` | ~300 | **1**（只有初始化那次） |
+| `setInterval(16ms)` | ~300 | **5** |
+| `setTimeout(16ms)` 自链 | ~300 | **5** |
+| 壳的 `evaluateJavaScript` 心跳 | 50 | **50，分毫不差** |
+
+浮层是 `.nonactivatingPanel` + screenSaver 层 + `.accessory` 激活策略，WebKit 判定这个 WebView 不可见，于是**停掉 rAF、把 JS 定时器钳到约 1Hz**。从原生侧 push 进去的 `evaluateJavaScript` 不受影响，因为它不由页面的调度器决定。
+
+三个后果，写主题前必须知道：
+
+1. **`onTick` 是页面唯一可用的画面时钟，也就是 10fps。** 不是「rAF 更顺滑但 onTick 更可靠」的取舍——rAF 根本不跑。第七节那句「rAF 可以画帧，但不能决定是否到点」要按这个更正：rAF 连画帧都不行。
+2. **`default` 主题的 LED 信号板从来没滚动过。** 它的滚动完全建立在 rAF 上，实测 `累计rAF帧数=0`。屏幕上一直是张静止的信号板。本节上方「稳定性 连跑 3 次 7.25s」记的只是时长，不含运动。这个缺陷还没修。
+3. **CSS 过渡/动画不受影响**，它们由合成器驱动，不走页面的 JS 调度器。`tunnel` 整套效果都是 CSS transition，所以它是好的。纯 CSS 主题同理。
+
+要真正拿回 rAF，得让 WebKit 认为这个 view 可见（方向：`NSWindow.occlusionState`、`_windowOcclusionDetectionEnabled`、或者别把 panel 放在 screenSaver 层）——那是壳的改动，还没做。在那之前，需要逐帧运动的主题只有两条路：用 CSS 动画，或者接受 10fps 的心跳。
+
 ### 全屏检测
 
 - **目前是启发式**（`visibleFrame.height >= frame.height`），开了「自动隐藏菜单栏」会误判。要更准就用 `CGWindowListCopyWindowInfo` 遍历 layer 0 窗口看 bounds——**只读 bounds，绝对不要读窗口标题**，读标题会触发屏幕录制权限申请，CLI 工具首次运行弹这个框体验极差。

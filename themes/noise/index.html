@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>gong · noise</title>
+<style>
+  /* 背景必须真透明——壳那边已经关掉 WebView 的绘制背景了 */
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden;
+               -webkit-user-select:none; cursor:none; }
+
+  #stage {
+    position: fixed; inset: 0;
+    opacity: 0;
+    transition: opacity .45s ease-out;
+    will-change: opacity;
+  }
+  html.gong-live #stage { opacity: 1; }
+
+  /* 中央压暗一圈，让白字在任意桌面背景上都读得出来。
+     刻意不铺满：gong 的前提是盖在桌面上而不是盖住桌面。 */
+  #veil {
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at 50% 50%,
+      rgba(0,0,0,.58) 0%, rgba(0,0,0,.40) 32%, rgba(0,0,0,0) 70%);
+  }
+
+  canvas { position: absolute; inset: 0; display: block; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #stage { transition-duration: .01ms; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="veil"></div>
+    <canvas id="fuzz"></canvas>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  const g = window.gong;
+
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  function formatClock(ms) {
+    const d = new Date(ms);
+    return pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  // ── 原组件的 props 在这里变成写死的配置。静态主题没有调用方，
+  //    想改文案节奏就直接改这一段。 ────────────────────────────
+  const CONFIG = {
+    // 显示的文字，一行一个。用 g.target 而不是 now：显示的应该是「约定的
+    // 那个点」，不是渲染到这一帧的墙上时间，所以整场不会变，离屏画布只画一次。
+    lines: () => [formatClock(g.target), 'CLOCK OUT'],
+    color: '#FFFFFF',
+
+    // 撕裂幅度，按字号取比例。原组件的 fuzzRange 是像素绝对值（默认 30，
+    // 配它自己 120px 的字号），换算成比例才跟屏幕大小无关。
+    //
+    // 0.22 就是原组件那个 30/120 的换算值，但实测下来位移只有字号的 22%，
+    // 字还清清楚楚——因为原组件那一档本来是 hover/click 才触发的「最猛」，
+    // 而这里 noise=1 是常态起点。取 0.7（位移达字号的 70%）才真的糊成静噪。
+    fuzzRatio: .7,
+
+    // 强度曲线。0 = 完全清晰，1 = 撕满 fuzzRange。
+    // 亮相时几乎认不出，到点那一刻最清晰，退场炸开——原组件靠 hover/click
+    // 切换这三档，gong 的浮层不吃鼠标事件，改由距离 target 的时间驱动。
+    noiseAtReveal: 1,
+    noiseAtTarget: .035,
+    noiseAtExit: 1.8,
+
+    holdMs: 1600,   // 到点后保持清晰多久
+    exitMs: 900,    // 炸开 + 淡出的时长
+  };
+
+  const stage = document.getElementById('stage');
+  const canvas = document.getElementById('fuzz');
+  const ctx = canvas.getContext('2d');
+
+  // 逻辑像素 → 设备像素。整套撕裂都在设备像素上做，否则 Retina 上
+  // 每行只挪半个物理像素，看着像糊了一层而不是撕开。
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  let cssW = 0, cssH = 0;
+
+  // ── 离屏画布：清晰的那一份文字 ────────────────────────────
+  //
+  // 原组件把可见画布裁到文字大小再留边距，那是为了嵌在页面里。全屏浮层
+  // 直接铺满视口更简单：离屏只装文字块，可见画布铺满，每帧把离屏的每一行
+  // 按随机横向偏移拷过去。
+  const off = document.createElement('canvas');
+  const offCtx = off.getContext('2d');
+
+  const FONT_STACK = '-apple-system, "SF Pro Display", "Helvetica Neue", Inter, sans-serif';
+  let blockW = 0, blockH = 0, fuzzRange = 0;
+
+  function buildOffscreen() {
+    const lines = CONFIG.lines();
+
+    // 字号按视口比例，并保证最长那行塞得进 86% 屏宽。
+    // vh 那一路是给超宽屏兜底的：15vw 在 5120x1440 上会比屏幕还高。
+    let fontPx = Math.max(40, Math.min(cssW * .14, cssH * .30));
+    const probe = document.createElement('canvas').getContext('2d');
+    const widest = t => {
+      probe.font = '700 100px ' + FONT_STACK;
+      return Math.max(...t.map(s => probe.measureText(s).width));
+    };
+    const w100 = widest(lines);
+    if (w100 > 0) fontPx = Math.min(fontPx, cssW * .86 / (w100 / 100));
+
+    const lineH = fontPx * 1.12;
+    offCtx.font = '700 ' + Math.round(fontPx * dpr) + 'px ' + FONT_STACK;
+    offCtx.textBaseline = 'alphabetic';
+
+    let maxW = 0;
+    for (const s of lines) maxW = Math.max(maxW, offCtx.measureText(s).width);
+
+    const ascent = fontPx * dpr * .78;   // 够装大写和数字，不必精确到字形
+    blockW = Math.ceil(maxW);
+    blockH = Math.ceil(lineH * dpr * lines.length);
+
+    off.width = blockW;
+    off.height = blockH;
+
+    // 改过尺寸的画布会被重置，字体要重新设
+    offCtx.font = '700 ' + Math.round(fontPx * dpr) + 'px ' + FONT_STACK;
+    offCtx.textBaseline = 'alphabetic';
+    offCtx.textAlign = 'center';
+    offCtx.fillStyle = CONFIG.color;
+    lines.forEach((s, i) => {
+      offCtx.fillText(s, blockW / 2, ascent + i * lineH * dpr);
+    });
+
+    fuzzRange = Math.max(2, fontPx * dpr * CONFIG.fuzzRatio);
+  }
+
+  function measure() {
+    cssW = window.innerWidth;
+    cssH = window.innerHeight;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    buildOffscreen();
+  }
+
+  // ── 每帧的撕裂 ────────────────────────────────────────────
+  //
+  // 逐行把离屏拷到可见画布，每行一个随机横向偏移。这就是原组件的全部效果：
+  // 不是滤镜，是「一行一行错开」。
+  function draw(noise) {
+    const x0 = Math.round((canvas.width - blockW) / 2);
+    const y0 = Math.round((canvas.height - blockH) / 2);
+    const pad = Math.ceil(fuzzRange) + 8;
+
+    ctx.clearRect(x0 - pad, y0 - 4, blockW + pad * 2, blockH + 8);
+    if (noise <= 0) {
+      ctx.drawImage(off, x0, y0);
+      return;
+    }
+    for (let j = 0; j < blockH; j++) {
+      const dx = Math.round(noise * (Math.random() - .5) * fuzzRange);
+      ctx.drawImage(off, 0, j, blockW, 1, x0 + dx, y0 + j, blockW, 1);
+    }
+  }
+
+  // ── 生命周期 ──────────────────────────────────────────────
+  //
+  // 【画面也由壳的心跳驱动，不用 rAF】。这不是偏好，是实测：浮层是
+  // nonactivatingPanel + screenSaver 层 + .accessory 策略，WebKit 判定这个
+  // WebView 不可见，于是走遮挡节流——requestAnimationFrame 在整个生命周期里
+  // 只触发 1 次，setInterval(16ms) / setTimeout(16ms) 被钳到约 1Hz（实测
+  // 5 秒里只走了 5 步）。而壳从原生侧 push 的 evaluateJavaScript 心跳
+  // 100ms 一次、分毫不差。
+  //
+  // 所以页面里没有任何可用的自有时钟，onTick 就是唯一的画面时钟，
+  // 也就是 10fps。对静噪撕裂来说 10fps 反而更像坏掉的信号，不吃亏。
+  let revealedAt = 0;
+  let exitAt = 0;
+  let doneSent = false;
+  let noise = CONFIG.noiseAtReveal;
+  let alpha = 1;
+
+  // 缓动：越接近 target 收敛越快，静噪「锁定」的手感
+  const easeOut = p => 1 - Math.pow(1 - p, 3);
+
+  function noiseAt(now) {
+    if (exitAt) {
+      const q = Math.min(1, (now - exitAt) / CONFIG.exitMs);
+      alpha = 1 - q;
+      return CONFIG.noiseAtTarget + (CONFIG.noiseAtExit - CONFIG.noiseAtTarget) * q;
+    }
+    alpha = 1;
+    const leadMs = Math.max(0, Number(g.lead) || 0) * 1000;
+    const remain = g.target - now;
+    if (remain <= 0 || leadMs <= 0) return CONFIG.noiseAtTarget;
+    // p: 1 = 刚亮相，0 = 正好到点
+    const p = Math.min(1, remain / leadMs);
+    return CONFIG.noiseAtTarget +
+           (CONFIG.noiseAtReveal - CONFIG.noiseAtTarget) * easeOut(p);
+  }
+
+  function paint() {
+    ctx.globalAlpha = alpha;
+    draw(noise);
+    ctx.globalAlpha = 1;
+  }
+
+  measure();
+  draw(CONFIG.noiseAtReveal); // 亮相前先画一帧预热，真正显示时首帧不卡
+
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => { measure(); draw(noise); }).observe(document.body);
+  }
+
+  g.onReveal = () => {
+    revealedAt = g.now;
+    noise = noiseAt(g.now);
+    paint();
+  };
+
+  g.onTick = now => {
+    if (!revealedAt || doneSent) return;
+
+    // 到点后清晰停留够了就开始炸。判据是绝对时间差，不是数了几次心跳。
+    if (!exitAt && now - g.target >= CONFIG.holdMs) exitAt = now;
+
+    noise = noiseAt(now);
+    paint();
+
+    if (exitAt && now - exitAt >= CONFIG.exitMs) {
+      doneSent = true;
+      stage.style.opacity = 0;
+      // 每块屏各画各的，不用判断 primary——非主屏这一句会被壳注入的
+      // gong.done 安静吃掉
+      g.done();
+    }
+  };
+})();
+</script>
+</body>
+</html>
