@@ -1,11 +1,11 @@
 class Gong < Formula
   desc "I'm outta here!"
   homepage "https://github.com/xwvike/gong"
-  version "0.1.5"
+  version "0.1.6"
   license "MIT"
 
   url "https://github.com/xwvike/gong/releases/download/v#{version}/gong-#{version}-macos-universal.tar.gz"
-  sha256 "REPLACE_WITH_SHA256_FROM_RELEASE"
+  sha256 "e440f87db73a6b084336ce3f0fca863f723b61b78be2258c52255f2ee5d8d94e"
 
   depends_on :macos
 
