@@ -154,24 +154,35 @@ func TestThemeAPIV1DoneMessageComesFromPrimaryMainFrame(t *testing.T) {
 		"NSApp.terminate(nil)")
 }
 
-func TestThemeAPIV1READMEPublicEntryPoints(t *testing.T) {
-	readme := readRepoFile(t, "README.md")
+// Theme API v1 的公开面必须一直被文档钉住，不能悄悄漂移。
+//
+// 这条测试原来读 README.md，因为当时 README 里有一段 window.gong 的 JS
+// 字面量。后来 README 收敛成「只讲怎么用」，写主题的内容整节移到了 doc.md，
+// 所以断言目标跟着搬过来——钉的东西没变少：doc.md 里是 TS 接口定义，
+// 比原来那段示意用的 JS 字面量更严（带类型和单位），而且是唯一的真相。
+func TestThemeAPIV1DocPublicEntryPoints(t *testing.T) {
+	doc := readRepoFile(t, "doc.md")
 	for _, entry := range []string{
+		// 数据字段
 		"apiVersion: 1",
-		"onReveal: null",
-		"onTick: null",
-		"onFire: null",
-		"done() {}",
-		"g.onReveal",
+		// 三个回调槽：签名和「可以为 null」都是契约的一部分
+		"onReveal: (() => void) | null",
+		"onTick: ((now: EpochMilliseconds) => void) | null",
+		"onFire: (() => void) | null",
+		// 唯一的反向通道
+		"done(): void",
+		"g.done()",
+		// 主题实际怎么用回调
 		"g.onTick",
 		"g.onFire",
-		"g.done()",
-		"window.gong.screen.primary",
+		// 多屏单实例判据
+		"screen.primary",
+		// 给纯 CSS 主题的两个时间信号
 		"html.gong-live",
 		"html.gong-fired",
 	} {
-		if !strings.Contains(readme, entry) {
-			t.Errorf("README.md is missing Theme API v1 entry point %q", entry)
+		if !strings.Contains(doc, entry) {
+			t.Errorf("doc.md is missing Theme API v1 entry point %q", entry)
 		}
 	}
 }
