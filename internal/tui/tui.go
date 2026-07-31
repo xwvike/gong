@@ -156,15 +156,22 @@ func newThemeList(themes []theme.Theme) list.Model {
 	for i, t := range themes {
 		items[i] = themeItem{t}
 	}
+	// 主题只剩一个名字，没有第二行可写——关掉描述行并把每条压到 1 行、
+	// 条间不留空。留着默认的两行会在每个名字下面空出一条，看着像渲染坏了。
 	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false // 关掉后 Height() 恒为 1，不用再 SetHeight
+	delegate.SetSpacing(0)           // 默认条间留 1 行，三个名字会散成一屏
 	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
 		Foreground(colAmber).BorderForeground(colAmber)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(colAmber)
 
 	l := list.New(items, delegate, 0, 0)
-	l.Title = "主题库"
-	l.Styles.Title = l.Styles.Title.Background(colBg).Foreground(colAmber)
-	l.SetShowHelp(false) // 帮助统一走底部 help.Model，不要两份footer
+	// 顶上的 tab 栏已经把「主题库」高亮出来了，list 再画一遍标题是重复的；
+	// 定时那一屏也是直接铺 table.View()，不带自己的标题。条数同理，三个名字
+	// 一眼数得过来。两个都关掉，tab 栏底下直接就是主题名。
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetShowHelp(false)       // 帮助统一走底部 help.Model，不要两份footer
+	l.SetShowPagination(false) // 装不下时 applyLayout 会再打开
 	// 退出统一走 root 的 q；list 自带的 Quit/ForceQuit 会直接扔 tea.Quit，
 	// 连过滤输入时按 ctrl+c 都拦不住，必须先卸载。
 	l.KeyMap.Quit = key.NewBinding()
@@ -268,10 +275,16 @@ func (m *Model) applyLayout() {
 	m.table.SetHeight(min(contentH, wantRows+1))
 
 	// list.View() 把内容区强制 .Height(availHeight) 渲染，主题没那么多条时
-	// 剩下的高度全用空行填——跟上面表格是同一类坑。listChrome 是标题栏、
-	// 状态栏（"N items"）、分页那三块加起来的行数，凭实测量出来的常数。
-	const listChrome = 6
-	itemLines := max(1, len(m.themes)*3-1) // 每条 2 行（标题+描述）+ 1 行间距，最后一条不留
+	// 剩下的高度全用空行填——跟上面表格是同一类坑。listChrome 是实测量出来的
+	// 常数：标题栏和条数栏都关了，分页区也关了，只剩标题栏那一行占位——它是留给
+	// "/" 过滤输入框的，即使 SetShowTitle(false) 也照样占一行，去不掉。
+	const listChrome = 1
+	itemLines := max(1, len(m.themes)) // delegate 压成了 1 行/条、条间无间距
+
+	// 主题多到一屏放不下时才把翻页点放回来：没有它，超出的主题会被静默截断，
+	// 光标翻到下一页也毫无提示。装得下就关掉，省下它那两行（spacing=0 时
+	// bubbles 会给分页区补一个 MarginTop(1)）。
+	m.list.SetShowPagination(itemLines+listChrome > contentH)
 	m.list.SetSize(w, min(contentH, itemLines+listChrome))
 }
 
