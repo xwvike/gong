@@ -1,4 +1,4 @@
-# gong（锣）
+# gong
 
 I'm outta here!
 
@@ -13,6 +13,7 @@ gong on
 
 
 ```bash
+gong on             # 启用 gong，让它提醒你该溜了！
 gong set            # 进入定时器管理
 gong ls             # 列出现有定时
 gong themes         # 列出可用主题
@@ -31,6 +32,10 @@ gong off            # 关掉 gong，但保留配置和程序
 
 <img src="docs/tunnel.gif" alt="tunnel" width="720">
 
+### noise
+
+<img src="docs/noise.gif" alt="noise" width="720">
+
 ## 卸载gong
 
 ```bash
@@ -39,6 +44,5 @@ gong uninstall
 
 参数 `--purge` 会同时清除自定义主题目录 `~/.config/gong`。
 
-**别直接 `brew uninstall gong`** —— formula 没有 uninstall hook，plist 会留在
-`~/Library/LaunchAgents`，之后每天到点去拉一个不存在的二进制，而且是静默失败。
-`gong uninstall` 会先清 plist、从 launchd 撤出，最后自动帮你跑 `brew uninstall`。
+**避免直接 `brew uninstall gong`** ——  会导致plist 会留在
+`~/Library/LaunchAgents`。
