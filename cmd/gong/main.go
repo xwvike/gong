@@ -444,11 +444,7 @@ func cmdThemes() error {
 		return fmt.Errorf("一个主题都没找到（找过 %s 和 %s）", paths.UserThemes(), paths.Builtin())
 	}
 	for _, t := range list {
-		src := "内置"
-		if !t.Builtin {
-			src = "自定义"
-		}
-		fmt.Printf("%-10s %-6s %s\n", t.ID, src, t.Meta.Desc)
+		fmt.Println(t.ID)
 	}
 	return nil
 }

@@ -97,19 +97,7 @@ func (m Model) renderEditPanel() string {
 	b.WriteString(styleLabel.Render("主题") + " " + m.renderThemeField(*s) + styleDim.Render("  (t 打开主题库)") + "\n")
 	b.WriteString(styleLabel.Render("星期") + " " + m.renderWeek(*s))
 
-	th, err := theme.Resolve(s.Theme)
-	detail := ""
-	if err == nil {
-		detail = th.ID
-		if th.Meta.Desc != "" {
-			detail += " — " + th.Meta.Desc
-		}
-	}
-	panel := stylePanel.Render(b.String())
-	if detail != "" {
-		panel += "\n" + styleDim.Render("  "+detail)
-	}
-	return panel
+	return stylePanel.Render(b.String())
 }
 
 func (m Model) renderClock(s config.Schedule) string {

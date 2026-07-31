@@ -10,6 +10,6 @@ type themeItem struct{ t theme.Theme }
 
 func (i themeItem) Title() string { return i.t.ID }
 
-func (i themeItem) Description() string { return i.t.Meta.Desc }
+func (i themeItem) Description() string { return "" }
 
 func (i themeItem) FilterValue() string { return i.t.ID }
