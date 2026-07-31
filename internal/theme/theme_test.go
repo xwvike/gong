@@ -27,9 +27,6 @@ func TestThemeLimits(t *testing.T) {
 
 func TestLegacyThemeMetadataDefaults(t *testing.T) {
 	th := Theme{ID: "legacy"}
-	if got := th.Label(); got != "legacy" {
-		t.Errorf("Label() = %q, want legacy", got)
-	}
 	if got := th.LeadSeconds(); got != 0 {
 		t.Errorf("LeadSeconds() = %d, want 0", got)
 	}

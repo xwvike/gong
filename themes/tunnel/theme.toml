@@ -1,5 +1,4 @@
 # 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
-name      = "字幕隧道"
 desc      = "3、2、1 由远及近迎面冲来，到点亮出时刻，再推出 CLOCK OUT，随后放大穿过屏幕散去。"
 lead      = 3        # 倒数三个数，主题里的 countFrom 直接跟着这个值走
 duration  = 9        # 3s 倒数 + 1.9s 时刻牌 + 2.1s CLOCK OUT + 1.2s 退场，留点余量

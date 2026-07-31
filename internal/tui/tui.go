@@ -637,5 +637,5 @@ func (m Model) previewTheme(th theme.Theme) (string, bool) {
 		return err.Error(), true
 	}
 	go cmd.Wait() // 收尸，别留僵尸进程
-	return "正在预览 " + th.Label(), false
+	return "正在预览 " + th.ID, false
 }

@@ -15,8 +15,8 @@ import (
 // 两个假主题，不依赖磁盘上真实的 themes/ 目录，专门用来驱破选主题的往返流程。
 func fakeThemes() []theme.Theme {
 	return []theme.Theme{
-		{ID: "alpha", HTML: "/dev/null", Meta: theme.Meta{Name: "Alpha", Lead: 0, Duration: 5}},
-		{ID: "beta", HTML: "/dev/null", Meta: theme.Meta{Name: "Beta", Lead: 3, Duration: 8}},
+		{ID: "alpha", HTML: "/dev/null", Meta: theme.Meta{Lead: 0, Duration: 5}},
+		{ID: "beta", HTML: "/dev/null", Meta: theme.Meta{Lead: 3, Duration: 8}},
 	}
 }
 
@@ -371,7 +371,7 @@ func TestSaveFailsValidationWithoutQuitting(t *testing.T) {
 func TestAddUsesDefaultThemeNotAlphabeticalFirst(t *testing.T) {
 	withDefault := append(fakeThemes(), theme.Theme{
 		ID: config.DefaultTheme, HTML: "/dev/null",
-		Meta: theme.Meta{Name: "内置", Duration: 5},
+		Meta: theme.Meta{Duration: 5},
 	})
 	c := twoSchedules()
 

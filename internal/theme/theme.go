@@ -17,8 +17,7 @@ import (
 )
 
 type Meta struct {
-	Name      string `toml:"name"`      // 展示名，可以是中文
-	Desc      string `toml:"desc"`      //
+	Desc      string `toml:"desc"`
 	Lead      int    `toml:"lead"`      // 提前多少秒亮相
 	Duration  int    `toml:"duration"`  // 从实际亮相到视觉预计结束的秒数
 	Placement string `toml:"placement"` // center / edge / corner
@@ -63,13 +62,6 @@ func (t Theme) TimeoutSeconds() int {
 		d += timeoutMargin
 	}
 	return d
-}
-
-func (t Theme) Label() string {
-	if t.Meta.Name != "" {
-		return t.Meta.Name
-	}
-	return t.ID
 }
 
 func load(dir string, builtin bool) (Theme, error) {

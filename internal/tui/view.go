@@ -100,8 +100,10 @@ func (m Model) renderEditPanel() string {
 	th, err := theme.Resolve(s.Theme)
 	detail := ""
 	if err == nil {
-		detail = fmt.Sprintf("%s — %s（提前 %ds 亮相，%s）",
-			th.Label(), th.Meta.Desc, th.LeadSeconds(), placementLabel(th.Meta.Placement))
+		detail = th.ID
+		if th.Meta.Desc != "" {
+			detail += " — " + th.Meta.Desc
+		}
 	}
 	panel := stylePanel.Render(b.String())
 	if detail != "" {

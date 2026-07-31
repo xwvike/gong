@@ -448,7 +448,7 @@ func cmdThemes() error {
 		if !t.Builtin {
 			src = "自定义"
 		}
-		fmt.Printf("%-10s %-6s lead %-3d %-8s %s\n", t.ID, src, t.LeadSeconds(), t.Meta.Placement, t.Meta.Desc)
+		fmt.Printf("%-10s %-6s %s\n", t.ID, src, t.Meta.Desc)
 	}
 	return nil
 }

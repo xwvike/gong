@@ -1,5 +1,4 @@
 # 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
-name      = "静噪"
 desc      = "时刻和 CLOCK OUT 从一片横向撕裂的静噪里逐渐锁定，到点最清晰，随后炸开淡出。"
 lead      = 4        # 静噪收敛需要 4 秒，主题按 lead 算强度曲线
 duration  = 7        # 4s 收敛 + 1.6s 清晰停留 + 0.9s 炸开，留点余量
