@@ -10,9 +10,13 @@
 
   /* 一条 LED 信号带贴在屏幕顶部，不挡视线中央，个头也不用那么大——
      这不是要人盯着看的主视觉，扫一眼知道时间和状态就够了。
-     band 本身只管出现/收起的过渡，画面全交给里面的 canvas。 */
+     band 本身只管出现/收起的过渡，画面全交给里面的 canvas。
+
+     top 要躲开菜单栏：浮层是整屏的，vh 从屏幕最顶上算起，而菜单栏就占掉
+     约 3vh，原来的 4vh 等于紧贴着它。菜单栏高度是固定 pt、不随屏幕缩放，
+     所以再兜一个像素下限——纯 vh 在矮屏上照样会贴上去。 */
   .band {
-    position: fixed; left: 0; right: 0; top: 4vh; height: 9vh;
+    position: fixed; left: 0; right: 0; top: max(9vh, 76px); height: 9vh;
     transform: scaleY(.4); opacity: 0;
     transition: opacity .55s ease-out, transform .55s cubic-bezier(.2,.8,.2,1);
     will-change: opacity, transform;
