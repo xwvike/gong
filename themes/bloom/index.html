@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>gong · bloom</title>
+<style>
+  /* 背景必须真透明——壳那边已经关掉 WebView 的绘制背景了 */
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden;
+               -webkit-user-select:none; cursor:none; }
+
+  /* 进场/退场只走 opacity，由合成器跑。
+     .94 而不是 1：见脚本开头第 3 条，这是「纸」压在桌面上的那点透。 */
+  #stage {
+    position: fixed; inset: 0;
+    opacity: 0;
+    transition: opacity .55s ease-out;
+    will-change: opacity;
+  }
+  html.gong-live #stage { opacity: .94; }
+
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #stage { transition-duration: .01ms; }
+  }
+</style>
+</head>
+<body>
+  <div id="stage"><canvas id="gl"></canvas></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const g = window.gong;
+  if (g.apiVersion !== 1) throw new Error('unsupported Theme API');
+
+  // ── 跟原设计稿的出入 ────────────────────────────────────────────
+  //
+  // 1【词表换成 gong 的内容，尺寸锁改成按最长的词算】原稿轮播三个词，靠
+  //   「按高度锁定 cap-height」保证每个词一样大，宽度只是兜底。gong 要显示
+  //   的是时刻和 CLOCK OUT，长短差一倍，照原样锁高度的话 CLOCK OUT 会撞到
+  //   宽度上限被单独缩小，「每个词一样大」就没了。所以改成：先按最长的那个
+  //   词算出唯一的字号，所有词共用它——尺寸统一这个意图保住了，只是由最长的
+  //   词说了算。
+  //
+  // 2【没有指针】原稿有跟随光标的局部热点和一圈漩涡形变（warpUV/hot）。
+  //   浮层不接收鼠标事件（nonactivating + cursor:none），这两块连同它们的
+  //   八个 uniform 一起删掉，而不是留着恒为 0 白算——合成 pass 是逐像素
+  //   满屏跑的，留着不便宜。
+  //
+  // 3【纸不是全不透明】原稿是一张浅色纸，`alpha:false` 整屏铺满。gong 的
+  //   前提是盖在桌面上而不是盖住桌面，所以 WebGL 这边照旧不透明（着色器的
+  //   soft-light 颗粒和渐变映射都需要一个确定的底），透是在 CSS 那层给
+  //   #stage 一个 .94 的 opacity。纸还是纸，只是能感觉到后面有东西。
+  //
+  // 4【时钟】画面走 rAF，绝对时刻走壳的心跳锚点，跟 dotcut/noise 一致。
+  //   见下面 clockNow。退场闸门只认心跳。
+  //
+  // 其余照原稿：白色剪影遮罩、4 级逐级降采样的可分离 H/V 9-tap 高斯 bloom、
+  // 由词的 x 跨度驱动的可变焦（中间实、两端虚）、按权重求和成灰度辉光场再
+  // 加 gamma、反相后过 5 段渐变映射、上面压 ink 色的实词、soft-light 胶片
+  // 颗粒、bloom 正弦呼吸、色相漂移、按字母序错开的交叉溶解。
+
+  // ── 配置 ──────────────────────────────────────────────────────
+  const DPR_CAP    = 1.5;   // 原稿值
+  const LOCK_RATIO = .34;   // 锁定字号 = 画布高度的 34%，原稿值
+  const MAX_W      = .66;   // 词最宽占画布的 66%，原稿值
+  const FOCUS_AMT  = 1.5;   // 可变焦强度，原稿值
+  const GRAIN      = .4;    // 颗粒强度，原稿值
+  const MORPH_LEAD = .78;   // 辉光比实体先走
+  const MORPH_LAG  = 1.3;   // 实体比辉光后到
+  const LETTER_SPREAD = .45;// 字母之间错开多少
+  const BREATH     = .22;   // 出场/入场两条时钟的错位
+  const CAST_DIR   = [.38, .92];                    // 辉光投射方向
+  const CAST_STEP  = [.0008, .0022, .0042, .0075];  // 每级的投射距离
+  const LEVELS     = [[.5, 2], [.25, 3], [.125, 3], [.0625, 3]]; // [降采样, 半径]
+
+  const MORPH_MS  = 800;   // 交叉溶解时长，原稿的 MORPH_SEC
+  const SETTLE_MS = 2400;  // 溶解完成后 CLOCK OUT 停多久
+  const EXIT_MS   = 1000;  // 淡出
+  const FONT = '-apple-system, "SF Pro Display", "Helvetica Neue", Inter, sans-serif';
+
+  const stage = document.getElementById('stage');
+  const canvas = document.getElementById('gl');
+
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  // 用 g.target 而不是 now：显示的是「约定的那个点」，整场不变。
+  const WORDS = [
+    (() => { const d = new Date(g.target);
+             return pad(d.getHours()) + ':' + pad(d.getMinutes()); })(),
+    'CLOCK OUT',
+  ];
+
+  // ── 调色板 ────────────────────────────────────────────────────
+  const rgb = h => [parseInt(h.slice(1,3),16)/255,
+                    parseInt(h.slice(3,5),16)/255,
+                    parseInt(h.slice(5,7),16)/255];
+  const PALETTES = [
+    { stops:['#0c0622','#5b1fd6','#ff3bd4','#ffcf4d','#faf7ff'], ink:'#2a0f66', paper:'#faf7ff' },
+    { stops:['#28060a','#d21414','#ff6a1f','#ffcf52','#fff7ec'], ink:'#7a1410', paper:'#fff7ec' },
+    { stops:['#2a0718','#ff1e8e','#ff7ab0','#ffe0b0','#fff5fa'], ink:'#8a0e52', paper:'#fff5fa' },
+    { stops:['#04102e','#1550ff','#25c8ff','#bff0ff','#f4faff'], ink:'#0a2b8c', paper:'#f4faff' },
+    { stops:['#03170f','#0f7a4a','#1fd88a','#b8f5d8','#f3fbf6'], ink:'#0a3d28', paper:'#f3fbf6' },
+    { stops:['#04161c','#0e7d86','#f2a20c','#ffe27a','#fefaf0'], ink:'#0a3a40', paper:'#fefaf0' },
+  ];
+  const POS = [0, .22, .46, .72, 1];
+
+  function pal(i) {
+    const p = PALETTES[((i % PALETTES.length) + PALETTES.length) % PALETTES.length];
+    const colors = [];
+    for (const s of p.stops) colors.push(...rgb(s));
+    return { positions: POS.slice(), colors, ink: rgb(p.ink), paper: rgb(p.paper) };
+  }
+
+  // 交叉溶解时直接按分量插值会在中点掉到一片灰泥——两个饱和色的中点饱和度
+  // 必然比两端低。这里把中点的饱和度顶回两端里较高的那个，路径中间照样是
+  // 个「有颜色的颜色」。bell 在两端为 0，所以起止点分毫不动。
+  const LUMA = [.2126, .7152, .0722];
+  function satLerp(x, y, t) {
+    const out = x.map((v, i) => v + (y[i] - v) * t);
+    const bell = Math.sin(Math.PI * t);
+    if (bell < 1e-4) return out;
+    const satOf = (a,b,c) => { const mx = Math.max(a,b,c);
+                               return mx === 0 ? 0 : (mx - Math.min(a,b,c)) / mx; };
+    for (let i = 0; i + 2 < out.length; i += 3) {
+      const r = out[i], gg = out[i+1], b = out[i+2];
+      const target = Math.max(satOf(x[i],x[i+1],x[i+2]), satOf(y[i],y[i+1],y[i+2]));
+      const s = satOf(r, gg, b);
+      if (s < 1e-4 || target < 1e-4) continue;
+      const k = (s + (target - s) * bell) / s;
+      const L = LUMA[0]*r + LUMA[1]*gg + LUMA[2]*b;
+      out[i]   = Math.min(1, Math.max(0, L + (r  - L) * k));
+      out[i+1] = Math.min(1, Math.max(0, L + (gg - L) * k));
+      out[i+2] = Math.min(1, Math.max(0, L + (b  - L) * k));
+    }
+    return out;
+  }
+  function lerpPal(a, b, t) {
+    return {
+      positions: a.positions.map((v, i) => v + (b.positions[i] - v) * t),
+      colors: satLerp(a.colors, b.colors, t),
+      ink:    satLerp(a.ink,    b.ink,    t),
+      paper:  satLerp(a.paper,  b.paper,  t),
+    };
+  }
+
+  // 每天换一套颜色：用 target 的分钟数选起点，同一次触发里恒定。
+  const palSeed = Math.floor(g.target / 60000);
+  const palFrom = pal(palSeed);
+  const palTo   = pal(palSeed + 1);
+
+  // ── 词遮罩 ────────────────────────────────────────────────────
+  //
+  // 白色剪影进 alpha，字母序号进 R 通道——着色器靠 R 让字母一个接一个地
+  // 溶解，而不是整块一起淡。
+  const mc = document.createElement('canvas');
+  const mx = mc.getContext('2d', { willReadFrequently: false });
+
+  function totalWidth(ctx, text, size) {
+    const ls = size * .015;
+    const chars = [...text];
+    let w = 0;
+    for (const c of chars) w += ctx.measureText(c).width;
+    return w + ls * (chars.length - 1);
+  }
+
+  // 见开头第 1 条：唯一的字号由最长的词决定，所有词共用。
+  function lockedSize(W, H) {
+    let size = H * LOCK_RATIO;
+    mx.font = '600 ' + size + 'px ' + FONT;
+    let widest = 0;
+    for (const w of WORDS) widest = Math.max(widest, totalWidth(mx, w, size));
+    const maxW = W * MAX_W;
+    if (widest > maxW) size *= maxW / widest;
+    return size;
+  }
+
+  function makeMask(text, W, H, size) {
+    mc.width = W; mc.height = H;
+    mx.clearRect(0, 0, W, H);
+    mx.font = '600 ' + size + 'px ' + FONT;
+    mx.textAlign = 'left';
+    mx.textBaseline = 'middle';
+
+    const ls = size * .015;
+    const chars = [...text];
+    const widths = chars.map(c => mx.measureText(c).width);
+    const total = widths.reduce((a, b) => a + b, 0) + ls * (chars.length - 1);
+    const left = W / 2 - total / 2;
+    const last = Math.max(1, chars.length - 1);
+    let x = left;
+    for (let i = 0; i < chars.length; i++) {
+      mx.fillStyle = 'rgba(' + Math.round((i / last) * 255) + ',0,0,1)';
+      mx.fillText(chars[i], x, H * .52);
+      x += widths[i] + ls;
+    }
+    // x 跨度交给可变焦：中间实、两端虚
+    return { x0: left / W, x1: (left + total) / W };
+  }
+
+  // ── 着色器 ────────────────────────────────────────────────────
+  const VERT = `
+attribute vec2 aPos; varying vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }`;
+
+  // 共用的分形噪声：溶解的边界是一条被噪声揉过的锋面，不是直线扫描
+  const NOISE = `
+float hash(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
+float vnoise(vec2 p){
+  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+  float a=hash(i), b=hash(i+vec2(1.0,0.0)), c=hash(i+vec2(0.0,1.0)), d=hash(i+vec2(1.0,1.0));
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+float fbm(vec2 p){
+  float v=0.0, a=0.5;
+  for(int i=0;i<4;i++){ v+=a*vnoise(p); p=p*2.0+11.0; a*=0.5; }
+  return v;
+}
+float transitionMask(vec2 uv, float m){
+  vec2 q = vec2(fbm(uv*2.1+3.7), fbm(uv*2.1-1.3));
+  float n = fbm(uv*3.0 + q*1.1);
+  float bias = (uv.x*0.8 + uv.y*0.2) * 0.30;
+  float field = clamp(n*0.74 + bias, 0.0, 1.0);
+  const float BAND = 0.26;
+  float thr = mix(1.0+BAND, -BAND, m);
+  return smoothstep(thr-BAND, thr+BAND, field);
+}
+float letterPhase(sampler2D tex, vec2 uv, float m, float spread){
+  float idx = texture2D(tex, uv).r;
+  return clamp((m*(1.0+spread)) - idx*spread, 0.0, 1.0);
+}`;
+
+  // 可分离 9-tap 高斯。uFocus 是词的 x 跨度，越靠两端 dir 越长 → 糊得越狠。
+  const BLUR_FRAG = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 vUv;
+uniform sampler2D uTex, uTexB;
+uniform vec2 uDir, uFocus;
+uniform float uFocusAmt, uUseMorph, uPartOut, uPartIn, uLetterSpread;
+${NOISE}
+vec4 samp(vec2 uv){
+  if (uUseMorph > 0.5) {
+    vec4 a = texture2D(uTex, uv);
+    vec4 b = texture2D(uTexB, uv);
+    float outM = transitionMask(uv, letterPhase(uTex,  uv, uPartOut, uLetterSpread));
+    float inM  = transitionMask(uv, letterPhase(uTexB, uv, uPartIn,  uLetterSpread));
+    return max(a*(1.0-outM), b*inM);
+  }
+  return texture2D(uTex, uv);
+}
+void main(){
+  float mid = (uFocus.x + uFocus.y) * 0.5;
+  float halfW = max(0.001, (uFocus.y - uFocus.x) * 0.5);
+  float ends = clamp(abs(vUv.x - mid) / halfW, 0.0, 1.6);
+  vec2 dir = uDir * (1.0 + uFocusAmt * ends * ends);
+
+  vec4 c = samp(vUv) * 0.2270270270;
+  c += (samp(vUv + dir) + samp(vUv - dir)) * 0.1945945946;
+  c += (samp(vUv + dir*2.0) + samp(vUv - dir*2.0)) * 0.1216216216;
+  c += (samp(vUv + dir*3.0) + samp(vUv - dir*3.0)) * 0.0540540541;
+  c += (samp(vUv + dir*4.0) + samp(vUv - dir*4.0)) * 0.0162162162;
+  gl_FragColor = c;
+}`;
+
+  const COMP_FRAG = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 vUv;
+uniform sampler2D uMask, uMaskB, uL0, uL1, uL2, uL3;
+uniform float uPartOut, uPartIn, uLetterSpread, uFront, uPhase, uBloom, uGrain;
+uniform vec2 uCast0, uCast1, uCast2, uCast3;
+uniform float uPos[5];
+uniform vec3 uCol[5], uInk, uPaper;
+${NOISE}
+float cover(vec2 uv){
+  float outM = transitionMask(uv, letterPhase(uMask,  uv, uPartOut, uLetterSpread));
+  float inM  = transitionMask(uv, letterPhase(uMaskB, uv, uPartIn,  uLetterSpread));
+  return max(texture2D(uMask, uv).a * (1.0-outM), texture2D(uMaskB, uv).a * inM);
+}
+vec3 gradientMap(float x){
+  vec3 c = uCol[0];
+  c = mix(c, uCol[1], smoothstep(uPos[0], uPos[1], x));
+  c = mix(c, uCol[2], smoothstep(uPos[1], uPos[2], x));
+  c = mix(c, uCol[3], smoothstep(uPos[2], uPos[3], x));
+  c = mix(c, uCol[4], smoothstep(uPos[3], uPos[4], x));
+  return c;
+}
+vec3 softLight(vec3 base, float g){
+  vec3 s = vec3(g);
+  vec3 lo = 2.0*base*s + base*base*(1.0-2.0*s);
+  vec3 hi = 2.0*base*(1.0-s) + sqrt(base)*(2.0*s-1.0);
+  return mix(lo, hi, step(0.5, s));
+}
+void main(){
+  vec2 uv = vUv;
+  float b = 1.0 + (uBloom - 1.0) * 1.25;
+
+  // 各级按递减权重求和成一个灰度辉光场
+  float glow = 1.00 * cover(uv)
+             + 0.92 * texture2D(uL0, uv + uCast0).a
+             + 0.78 * texture2D(uL1, uv + uCast1).a * b
+             + 0.58 * texture2D(uL2, uv + uCast2).a * b
+             + 0.40 * texture2D(uL3, uv + uCast3).a * b;
+  glow = clamp(glow / 2.45, 0.0, 1.0);
+
+  // gamma 让彩色带贴住字母，而不是摊成一大片
+  float field = pow(glow, 0.6);
+
+  // 溶解锋面本身亮一下，交界处才有「烧过去」的感觉
+  if (uFront > 0.001) {
+    vec2 q = vec2(fbm(uv*2.1+3.7), fbm(uv*2.1-1.3));
+    float n = fbm(uv*3.0 + q*1.1);
+    float fieldN = clamp(n*0.74 + (uv.x*0.8 + uv.y*0.2)*0.30, 0.0, 1.0);
+    float thrIn = mix(1.26, -0.26, uPartIn);
+    float edge = 1.0 - smoothstep(0.0, 0.30, abs(fieldN - thrIn));
+    field = clamp(field + edge * uFront * 0.30 * smoothstep(0.02, 0.45, glow), 0.0, 1.0);
+  }
+
+  // 色相漂移：一点点就够，是为了让静止的那几秒不死
+  float drift = 0.022 * sin(uPhase + uv.x*3.0 + uv.y*2.0);
+
+  // 反相后过渐变：纸对应亮端，字芯对应暗端
+  vec3 col = gradientMap(clamp(1.0 - field + drift, 0.0, 1.0));
+
+  // 最外圈那点反弹光，免得纸和辉光之间有一道硬边
+  vec3 bounced = mix(uPaper, uCol[2], texture2D(uL3, uv + uCast3).a * 0.16);
+  col = mix(bounced, col, smoothstep(0.0, 0.06, field));
+
+  // 实词压在上面，用 ink 而不是纯黑，并让辉光渗进字缘
+  float softCov = clamp(texture2D(uL0, uv).a * 1.05 + cover(uv) * 0.25, 0.0, 1.0);
+  float interior = smoothstep(0.18, 0.62, softCov);
+  vec3 bodyCol = mix(uInk, uCol[1], 0.5);
+  bodyCol = mix(bodyCol, uCol[2], (1.0 - interior) * 0.5);
+  float solid = smoothstep(0.35, 0.95, cover(uv));
+  bodyCol = mix(mix(bodyCol, uCol[2], 0.30), mix(bodyCol, uInk, 0.22), solid);
+  col = mix(col, bodyCol, interior * 0.9);
+
+  // 满屏 soft-light 胶片颗粒，相当于压一层 50% 灰噪声
+  col = mix(col, softLight(col, hash(gl_FragCoord.xy)), uGrain * (0.5 + 0.7*field));
+
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}`;
+
+  // ── WebGL 装配 ────────────────────────────────────────────────
+  const gl = canvas.getContext('webgl', { alpha:false, antialias:false,
+    premultipliedAlpha:false, powerPreference:'low-power' });
+
+  // 拿不到上下文就别干挺着：不画任何东西，到点后尽快退出，
+  // 让用户看到的是「什么都没发生」而不是「一块空白盖着屏幕」。
+  if (!gl) {
+    console.warn('bloom: 拿不到 WebGL 上下文，主题跳过');
+    // 等到约定的那一刻再收工，而不是立刻——浮层已经被亮出来了，提前消失
+    // 比安静地待到点更奇怪。反正画布上什么都没有，看着就是没发生过。
+    g.onTick = now => {
+      if (now >= g.target) { g.onTick = null; g.done(); }
+    };
+    return;
+  }
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      throw new Error('shader: ' + gl.getShaderInfoLog(s));
+    return s;
+  }
+  function link(vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+      throw new Error('link: ' + gl.getProgramInfoLog(p));
+    return p;
+  }
+
+  const blurProg = link(VERT, BLUR_FRAG);
+  const compProg = link(VERT, COMP_FRAG);
+
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+
+  const U = (p, names) => { const o = {};
+    for (const n of names) o[n] = gl.getUniformLocation(p, n); return o; };
+  const bu = U(blurProg, ['uTex','uTexB','uDir','uFocus','uFocusAmt',
+                          'uUseMorph','uPartOut','uPartIn','uLetterSpread']);
+  const cu = U(compProg, ['uMask','uMaskB','uL0','uL1','uL2','uL3',
+                          'uPartOut','uPartIn','uLetterSpread','uFront','uPhase',
+                          'uBloom','uGrain','uCast0','uCast1','uCast2','uCast3',
+                          'uPos[0]','uCol[0]','uInk','uPaper']);
+
+  function bindQuad(p) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    const l = gl.getAttribLocation(p, 'aPos');
+    gl.enableVertexAttribArray(l);
+    gl.vertexAttribPointer(l, 2, gl.FLOAT, false, 0, 0);
+  }
+
+  function makeTarget(w, h) {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { f, t, w, h };
+  }
+
+  function uploadMask(tex) {
+    const t = tex || gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, mc);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+
+  let levels = [], maskA = null, maskB = null;
+  let focusA = [.35,.65], focusB = [.35,.65];
+  let cw = 0, ch = 0;
+
+  function measure() {
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+    const w = Math.max(1, Math.round(window.innerWidth * dpr));
+    const h = Math.max(1, Math.round(window.innerHeight * dpr));
+    if (w === cw && h === ch && levels.length) return;
+    cw = w; ch = h;
+    canvas.width = w; canvas.height = h;
+
+    for (const lv of levels) {
+      gl.deleteFramebuffer(lv.out.f); gl.deleteTexture(lv.out.t);
+      gl.deleteFramebuffer(lv.tmp.f); gl.deleteTexture(lv.tmp.t);
+    }
+    levels = LEVELS.map(([s]) => {
+      const lw = Math.max(2, Math.round(w * s)), lh = Math.max(2, Math.round(h * s));
+      return { out: makeTarget(lw, lh), tmp: makeTarget(lw, lh) };
+    });
+
+    // 两个词共用一个字号（见开头第 1 条）。makeMask 画完当前这份 2D 画布，
+    // uploadMask 紧跟着把它传上去——顺序不能调换，中间那块画布是共用的。
+    const size = lockedSize(w, h);
+    const a = makeMask(WORDS[0], w, h, size); maskA = uploadMask(maskA);
+    focusA = [a.x0, a.x1];
+    const b = makeMask(WORDS[1], w, h, size); maskB = uploadMask(maskB);
+    focusB = [b.x0, b.x1];
+  }
+
+  function uploadPalette(u) {
+    gl.useProgram(compProg);
+    gl.uniform1fv(cu['uPos[0]'], new Float32Array(u.positions));
+    gl.uniform3fv(cu['uCol[0]'], new Float32Array(u.colors));
+    gl.uniform3fv(cu.uInk,   new Float32Array(u.ink));
+    gl.uniform3fv(cu.uPaper, new Float32Array(u.paper));
+  }
+
+  // ── 一帧 ─────────────────────────────────────────────────────
+  //
+  // morph 是 0..1 的交叉溶解进度，bloom/phase 是环境动效。全部由绝对时间
+  // 现算——不累加 dt，也不数心跳次数。
+  function draw(morph, bloom, phase) {
+    const em = morph*morph*morph*(morph*(morph*6 - 15) + 10); // smootherstep
+    const glowM = Math.pow(em, MORPH_LEAD);  // 辉光先走
+    const bodyM = Math.pow(em, MORPH_LAG);   // 实体后到
+    // 出场和入场两条时钟错开 BREATH，交界处才有一瞬间的「两个词都在」
+    const clocks = m => [Math.min(1, m*(1+BREATH)),
+                         Math.max(0, Math.min(1, m*(1+BREATH) - BREATH))];
+    const [glowOut, glowIn] = clocks(glowM);
+    const [bodyOut, bodyIn] = clocks(bodyM);
+
+    // ① 4 级降采样 bloom，每级先横后竖
+    gl.useProgram(blurProg);
+    bindQuad(blurProg);
+    gl.disable(gl.BLEND);
+    gl.uniform1f(bu.uFocusAmt, FOCUS_AMT);
+    gl.uniform1f(bu.uLetterSpread, LETTER_SPREAD);
+    gl.uniform1f(bu.uPartOut, glowOut);
+    gl.uniform1f(bu.uPartIn,  glowIn);
+    gl.uniform2f(bu.uFocus, focusA[0] + (focusB[0]-focusA[0])*em,
+                            focusA[1] + (focusB[1]-focusA[1])*em);
+
+    for (let i = 0; i < levels.length; i++) {
+      const lv = levels[i], r = LEVELS[i][1];
+      // 溶解中的那 0.8s 才在第 0 级做双词混合：samp() 里每个 tap 都要跑
+      // 三次 fbm，9 个 tap 就是上百次噪声采样，不该整场都付这个钱。
+      // 溶解完成后第 0 级直接换成 B 的遮罩，不用交换纹理。
+      const useMorph = (i === 0 && morph > 0 && morph < 1) ? 1 : 0;
+      const src = i === 0 ? (morph >= 1 ? maskB : maskA) : levels[i-1].out.t;
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, lv.tmp.f);
+      gl.viewport(0, 0, lv.tmp.w, lv.tmp.h);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+      gl.uniform1i(bu.uTex, 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskB);
+      gl.uniform1i(bu.uTexB, 1);
+      gl.uniform1f(bu.uUseMorph, useMorph);
+      gl.uniform2f(bu.uDir, r / lv.tmp.w, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, lv.out.f);
+      gl.viewport(0, 0, lv.out.w, lv.out.h);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, lv.tmp.t);
+      gl.uniform1i(bu.uTex, 0);
+      gl.uniform1f(bu.uUseMorph, 0);
+      gl.uniform2f(bu.uDir, 0, r / lv.out.h);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    // ② 合成
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, cw, ch);
+    gl.useProgram(compProg);
+    bindQuad(compProg);
+    uploadPalette(lerpPal(palFrom, palTo, em));
+
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, maskA);
+    gl.uniform1i(cu.uMask, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskB);
+    gl.uniform1i(cu.uMaskB, 1);
+    for (let i = 0; i < levels.length; i++) {
+      gl.activeTexture(gl.TEXTURE2 + i);
+      gl.bindTexture(gl.TEXTURE_2D, levels[i].out.t);
+      gl.uniform1i(cu['uL' + i], 2 + i);
+    }
+    gl.uniform1f(cu.uPartOut, bodyOut);
+    gl.uniform1f(cu.uPartIn,  bodyIn);
+    gl.uniform1f(cu.uLetterSpread, LETTER_SPREAD);
+    gl.uniform1f(cu.uFront, Math.sin(Math.PI * em)); // 两端为 0，只在溶解中亮
+    gl.uniform1f(cu.uPhase, phase);
+    gl.uniform1f(cu.uBloom, bloom);
+    gl.uniform1f(cu.uGrain, GRAIN);
+    const aspect = cw / Math.max(1, ch);
+    const casts = [cu.uCast0, cu.uCast1, cu.uCast2, cu.uCast3];
+    for (let i = 0; i < 4; i++)
+      gl.uniform2f(casts[i], CAST_DIR[0]*CAST_STEP[i]/aspect, CAST_DIR[1]*CAST_STEP[i]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  // ── 时钟：绝对时刻归壳，帧率归 rAF ────────────────────────────
+  //
+  // 壳的心跳是权威的绝对时间但只有 10Hz；rAF 有刷新率但不知道「到点」是
+  // 哪一刻。每次 onTick 打一个锚点（壳的绝对毫秒 ↔ 当时的 performance.now），
+  // 两次心跳之间由 performance.now 从锚点往前推。单调不回退。
+  let anchorGong = 0, anchorPerf = 0, lastClock = 0;
+  function clockNow() {
+    const t = anchorGong + (performance.now() - anchorPerf);
+    if (t > lastClock) lastClock = t;
+    return lastClock;
+  }
+
+  const reduced = window.matchMedia &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let revealedAt = 0, exitAt = 0, doneSent = false;
+
+  function update(now) {
+    const dt = now - g.target;
+    // 退场判据放在降级分支之前：降级模式也得照常走到 done()，
+    // 否则主题永远不喊收工，只能挂到壳的兜底 timeout。
+    if (!exitAt && dt >= MORPH_MS + SETTLE_MS) {
+      exitAt = now;
+      stage.style.opacity = 0;
+    }
+    // 降级模式就是原稿说的「一帧静止画面」：直接是溶解完成后的 CLOCK OUT
+    if (reduced) { draw(1, 1, 0); return; }
+
+    const morph = dt <= 0 ? 0 : Math.min(1, dt / MORPH_MS);
+    const t = (now - revealedAt) / 1000;
+    draw(morph, 1 + .16 * Math.sin(t * .6), t * .5);
+  }
+
+  let rafId = 0;
+  function frame() {
+    rafId = requestAnimationFrame(frame);
+    if (!revealedAt || doneSent) return;
+    update(clockNow());
+  }
+
+  measure();
+  uploadPalette(palFrom);
+  draw(0, 1, 0); // 亮相前预热一帧：着色器编译和首次 FBO 写入都在这里付掉
+
+  if (typeof ResizeObserver !== 'undefined') {
+    let seenW = window.innerWidth, seenH = window.innerHeight;
+    new ResizeObserver(() => {
+      if (window.innerWidth === seenW && window.innerHeight === seenH) return;
+      seenW = window.innerWidth; seenH = window.innerHeight;
+      measure();
+      if (revealedAt) update(clockNow()); else draw(0, 1, 0);
+    }).observe(document.body);
+  }
+
+  g.onReveal = () => {
+    revealedAt = g.now;
+    anchorGong = g.now; anchorPerf = performance.now(); lastClock = g.now;
+    update(g.now);
+    if (!reduced) rafId = requestAnimationFrame(frame);
+  };
+
+  g.onTick = now => {
+    if (!revealedAt || doneSent) return;
+    // 重新对锚。心跳的绝对值永远压过本地推算出来的那个。
+    if (now > anchorGong) { anchorGong = now; anchorPerf = performance.now(); }
+
+    // 心跳这一路照样完整推进一次，rAF 死掉时它就是唯一的画面时钟
+    const t = clockNow();
+    update(t);
+
+    if (exitAt && t - exitAt >= EXIT_MS) {
+      doneSent = true;
+      if (rafId) cancelAnimationFrame(rafId);
+      // 每块屏各画各的，不用判断 primary——非主屏这一句会被壳注入的
+      // gong.done 安静吃掉
+      g.done();
+    }
+  };
+})();
+</script>
+</body>
+</html>
