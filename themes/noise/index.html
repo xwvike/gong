@@ -168,20 +168,35 @@
 
   // ── 生命周期 ──────────────────────────────────────────────
   //
-  // 【画面也由壳的心跳驱动，不用 rAF】。这不是偏好，是实测：浮层是
-  // nonactivatingPanel + screenSaver 层 + .accessory 策略，WebKit 判定这个
-  // WebView 不可见，于是走遮挡节流——requestAnimationFrame 在整个生命周期里
-  // 只触发 1 次，setInterval(16ms) / setTimeout(16ms) 被钳到约 1Hz（实测
-  // 5 秒里只走了 5 步）。而壳从原生侧 push 的 evaluateJavaScript 心跳
-  // 100ms 一次、分毫不差。
+  // 【绝对时刻归壳，帧率归 rAF】。壳的心跳是权威的绝对时间但只有 10Hz，
+  // rAF 有刷新率但不知道「到点」是哪一刻。所以每次 onTick 打一个锚点
+  //（壳的绝对毫秒 ↔ 当时的 performance.now），两次心跳之间由
+  // performance.now 从锚点往前推：画面按刷新率走，绝对时刻每 100ms 被
+  // 校正一次，不累计漂移。
   //
-  // 所以页面里没有任何可用的自有时钟，onTick 就是唯一的画面时钟，
-  // 也就是 10fps。对静噪撕裂来说 10fps 反而更像坏掉的信号，不吃亏。
+  // 这里早先写的是「页面里没有任何可用的自有时钟，onTick 就是唯一的画面
+  // 时钟，也就是 10fps；对静噪撕裂来说 10fps 反而更像坏掉的信号」。依据是
+  // 一次实测：rAF 全程只触发 1 次、JS 定时器被钳到约 1Hz。**那条结论已被
+  // 复测推翻**（见 doc.md 第四节），rAF 是活的，这个主题每帧几百次逐行
+  // drawImage 的负载也扛得住满帧（实测 75.1fps / 每帧 603 行）。撕裂因此
+  // 从每秒换 10 次图案变成换 75 次——真实的模拟信号雪花本来就是场频
+  // 50/60Hz，10fps 那个说法是在约束下写的说辞。
+  //
+  // 但退场闸门仍然只认心跳：这条结论历史上翻过一次，就不能假设 rAF 在所有
+  // 机器/系统版本上都活着。rAF 万一死了，主题退化成 10fps 而不是卡死。
   let revealedAt = 0;
   let exitAt = 0;
   let doneSent = false;
   let noise = CONFIG.noiseAtReveal;
   let alpha = 1;
+
+  // clockNow 单调不回退：系统校时可能让 epoch 暂时倒退，让画面倒放太蠢。
+  let anchorGong = 0, anchorPerf = 0, lastClock = 0;
+  function clockNow() {
+    const t = anchorGong + (performance.now() - anchorPerf);
+    if (t > lastClock) lastClock = t;
+    return lastClock;
+  }
 
   // 缓动：越接近 target 收敛越快，静噪「锁定」的手感
   const easeOut = p => 1 - Math.pow(1 - p, 3);
@@ -215,23 +230,41 @@
     new ResizeObserver(() => { measure(); draw(noise); }).observe(document.body);
   }
 
+  // 心跳和 rAF 两条路调的是同一个函数，它只依赖传进来的绝对时间，
+  // 所以谁先到都得到一致的结果。
+  function update(now) {
+    // 到点后清晰停留够了就开始炸。判据是绝对时间差，不是数了几次心跳。
+    if (!exitAt && now - g.target >= CONFIG.holdMs) exitAt = now;
+    noise = noiseAt(now);
+    paint();
+  }
+
+  let rafId = 0;
+  function frame() {
+    rafId = requestAnimationFrame(frame);
+    if (!revealedAt || doneSent) return;
+    update(clockNow());
+  }
+
   g.onReveal = () => {
     revealedAt = g.now;
-    noise = noiseAt(g.now);
-    paint();
+    anchorGong = g.now; anchorPerf = performance.now(); lastClock = g.now;
+    update(g.now);
+    rafId = requestAnimationFrame(frame);
   };
 
   g.onTick = now => {
     if (!revealedAt || doneSent) return;
+    // 重新对锚。心跳的绝对值永远压过本地推算出来的那个。
+    if (now > anchorGong) { anchorGong = now; anchorPerf = performance.now(); }
 
-    // 到点后清晰停留够了就开始炸。判据是绝对时间差，不是数了几次心跳。
-    if (!exitAt && now - g.target >= CONFIG.holdMs) exitAt = now;
+    // 心跳这一路照样完整推进一次，rAF 死掉时它就是唯一的画面时钟
+    const t = clockNow();
+    update(t);
 
-    noise = noiseAt(now);
-    paint();
-
-    if (exitAt && now - exitAt >= CONFIG.exitMs) {
+    if (exitAt && t - exitAt >= CONFIG.exitMs) {
       doneSent = true;
+      if (rafId) cancelAnimationFrame(rafId);
       stage.style.opacity = 0;
       // 每块屏各画各的，不用判断 primary——非主屏这一句会被壳注入的
       // gong.done 安静吃掉
