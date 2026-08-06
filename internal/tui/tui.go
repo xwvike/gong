@@ -402,7 +402,7 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 不用取标签、不用管重不重复——新的一条排在最后，序号自己就是 #N。
 		m.cfg.Schedules = append(m.cfg.Schedules, config.Schedule{
 			At: "12:00:00", Weekdays: []int{1, 2, 3, 4, 5},
-			Theme: m.defaultThemeID(), Enabled: true, Grace: config.DefaultGrace,
+			Theme: config.ThemeRandom, Enabled: true, Grace: config.DefaultGrace,
 		})
 		m.changed = true
 		m.refreshTable()
@@ -526,16 +526,6 @@ func (m *Model) bump(s *config.Schedule, dir int) {
 	}
 	m.changed = true
 	m.refreshTable()
-}
-
-// defaultThemeID 优先选择默认主题，缺失时回落到首个可用主题。
-func (m *Model) defaultThemeID() string {
-	for _, t := range m.themes {
-		if t.ID == config.DefaultTheme {
-			return t.ID
-		}
-	}
-	return m.themes[0].ID
 }
 
 func (m *Model) themeChoices() []string {

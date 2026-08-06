@@ -472,16 +472,11 @@ func TestSaveFailsValidationWithoutQuitting(t *testing.T) {
 	}
 }
 
-// 新定时应优先使用默认主题，而非字母序第一项。
-func TestAddUsesDefaultThemeNotAlphabeticalFirst(t *testing.T) {
-	withDefault := append(fakeThemes(), theme.Theme{
-		ID: config.DefaultTheme, HTML: "/dev/null",
-		Meta: theme.Meta{Duration: 5},
-	})
+func TestAddUsesRandomTheme(t *testing.T) {
 	c := twoSchedules()
 
 	// 覆盖真实新增路径，而非只测辅助函数。
-	tm := teatest.NewTestModel(t, newModel(c, withDefault),
+	tm := teatest.NewTestModel(t, newModel(c, fakeThemes()),
 		teatest.WithInitialTermSize(100, 32))
 	t.Cleanup(func() { _ = tm.Quit() })
 	waitForRender(t, tm)
@@ -491,17 +486,7 @@ func TestAddUsesDefaultThemeNotAlphabeticalFirst(t *testing.T) {
 	if len(c.Schedules) != 3 {
 		t.Fatalf("应该新增一条，现在有 %d 条", len(c.Schedules))
 	}
-	if got := c.Schedules[2].Theme; got != config.DefaultTheme {
-		t.Errorf("新定时的主题 = %q，想要 %q（alpha 说明又回到了按字母序取第一个）",
-			got, config.DefaultTheme)
-	}
-}
-
-// 内置目录整个没装好时 led 解析不开，这时候必须还能建出定时来，
-// 不能因为拿不到 led 就崩或者留个空主题。
-func TestDefaultThemeIDFallsBackWhenDefaultMissing(t *testing.T) {
-	m := newModel(twoSchedules(), fakeThemes()) // 里面没有 led
-	if got := m.defaultThemeID(); got != "alpha" {
-		t.Errorf("没有 led 时该回落到列表第一个，得到 %q", got)
+	if got := c.Schedules[2].Theme; got != config.ThemeRandom {
+		t.Errorf("新定时的主题 = %q，想要 %q", got, config.ThemeRandom)
 	}
 }

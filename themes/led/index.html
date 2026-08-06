@@ -47,8 +47,6 @@
     spread: 1,             // 字符间距，单位是空白列数
     onColor: '#DA1E1E',
     offColor: null, // 没点亮的珠子就是纯透明——加一点暗红描边纯属多余的装饰
-    glowStrength: .6,
-    glowSize: 10,
     flickerStrength: 0,
     flickerSpeed: 5,
     // 活时钟无需等待完整滚动周期。
@@ -247,18 +245,6 @@
       : 1;
     ctx.globalAlpha = wobble;
     ctx.fillStyle = CONFIG.onColor;
-
-    if (CONFIG.glowStrength > 0) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.shadowColor = CONFIG.onColor;
-      ctx.shadowBlur = radius * 2 * CONFIG.glowSize;
-      ctx.globalAlpha = wobble * CONFIG.glowStrength;
-      ctx.fill();
-      ctx.restore();
-      ctx.globalAlpha = wobble;
-      ctx.fillStyle = CONFIG.onColor;
-    }
     ctx.fill();
     ctx.globalAlpha = 1;
   }
