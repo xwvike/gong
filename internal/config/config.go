@@ -5,7 +5,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,9 +20,7 @@ type Config struct {
 }
 
 type Schedule struct {
-	// Label 纯粹给人看，完全可选，留空就留空。不参与任何匹配、不拼进
-	// launchd label 或文件名，所以也没有字符限制——那些顾虑都是「名字曾经
-	// 是标识符」那版设计留下的，现在标识符是它在列表里的位置（序号）。
+	// Label 仅用于展示；定时身份由列表位置决定。
 	Label    string `toml:"label"`
 	At       string `toml:"at"`       // "HH:MM" 或 "HH:MM:SS"
 	Weekdays []int  `toml:"weekdays"` // launchd 口径：0/7=周日，1=周一 … 6=周六
@@ -32,24 +29,33 @@ type Schedule struct {
 	Grace    int    `toml:"grace"` // 秒。超出这个窗口就不放，防止睡醒后 launchd 补播
 }
 
-const DefaultGrace = 1200
+const (
+	CurrentVersion = 1
+	DefaultGrace   = 1200
+)
 
-// DefaultTheme 是 Go 唯一硬依赖的主题名。
-//
-// 主题体系本身是纯目录扫描的，增删主题不需要改任何 Go/Swift 代码——
-// 唯独「没得选的时候选谁」需要一个字面量兜底。把它收在这一个常量里，
-// 就是为了让这份依赖是显式的、可数的：全项目只有这里知道 "default"
-// 这个名字，别处一律走 theme.List() / theme.Resolve()。
-//
-// 注意它不保证存在：内置目录被删或没装好时 Resolve 会失败，
-// 调用方按「主题找不到」降级处理，不要假设这个名字一定解析得开。
+type diskConfig struct {
+	Version   int            `toml:"version"`
+	Schedules []diskSchedule `toml:"schedule"`
+}
+
+type diskSchedule struct {
+	Label    string `toml:"label"`
+	At       string `toml:"at"`
+	Weekdays []int  `toml:"weekdays"`
+	Theme    string `toml:"theme"`
+	Enabled  bool   `toml:"enabled"`
+	Grace    *int   `toml:"grace"`
+}
+
+// DefaultTheme 是新定时的首选主题；调用方仍需处理资源缺失。
 const DefaultTheme = "default"
 
 // Default 是 gong on 在没有配置时写下的东西。
 // 两条都给了标签只是做个示范——标签不是必须的，序号本身就够用。
 func Default() *Config {
 	return &Config{
-		Version: 1,
+		Version: CurrentVersion,
 		Schedules: []Schedule{
 			{Label: "午间", At: "12:00:00", Weekdays: []int{1, 2, 3, 4, 5},
 				Theme: DefaultTheme, Enabled: true, Grace: DefaultGrace},
@@ -65,14 +71,20 @@ func Exists() bool {
 }
 
 func Load() (*Config, error) {
-	var c Config
-	if _, err := toml.DecodeFile(paths.ConfigFile(), &c); err != nil {
+	var disk diskConfig
+	if _, err := toml.DecodeFile(paths.ConfigFile(), &disk); err != nil {
 		return nil, err
 	}
-	for i := range c.Schedules {
-		if c.Schedules[i].Grace == 0 {
-			c.Schedules[i].Grace = DefaultGrace
+	c := Config{Version: disk.Version, Schedules: make([]Schedule, 0, len(disk.Schedules))}
+	for _, raw := range disk.Schedules {
+		grace := DefaultGrace
+		if raw.Grace != nil {
+			grace = *raw.Grace
 		}
+		c.Schedules = append(c.Schedules, Schedule{
+			Label: raw.Label, At: raw.At, Weekdays: raw.Weekdays,
+			Theme: raw.Theme, Enabled: raw.Enabled, Grace: grace,
+		})
 	}
 	// 配置文件可以被手动编辑，所以读取时也要校验，避免 gong fire
 	// 绕过交互式保存入口直接使用坏配置。
@@ -97,20 +109,26 @@ func (c *Config) Save() error {
 	if err := os.MkdirAll(paths.ConfigDir(), 0o755); err != nil {
 		return err
 	}
-	// 先写临时文件再 rename：写到一半断电不会留下半个配置
-	tmp := paths.ConfigFile() + ".tmp"
-	f, err := os.Create(tmp)
+	f, err := os.CreateTemp(paths.ConfigDir(), ".config.toml.tmp-*")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}()
+	if err := f.Chmod(0o644); err != nil {
 		return err
 	}
 	enc := toml.NewEncoder(f)
 	if err := enc.Encode(c); err != nil {
-		f.Close()
-		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, paths.ConfigFile())
@@ -206,14 +224,13 @@ func (s Schedule) WeekdaysLabel() string {
 	return b.String()
 }
 
-// Validate 在保存前挡住会生成坏 plist 的配置。
-//
-// 注意这里不再检查「名字」——标签是可选的自由文本，没有唯一性要求，
-// 也没有字符限制，因为它不再拼进 launchd label 或文件名。出错信息里
-// 用 Ref(i) 指代第 i 条，标签留空时自动落回 "#序号"。
+// Validate 检查配置结构，不检查外部主题资源。
 func (c *Config) Validate() error {
 	if c == nil {
 		return fmt.Errorf("配置不能为空")
+	}
+	if c.Version != CurrentVersion {
+		return fmt.Errorf("不支持配置版本 %d，当前只支持版本 %d", c.Version, CurrentVersion)
 	}
 	for i, s := range c.Schedules {
 		ref := s.Ref(i)
@@ -243,5 +260,5 @@ func (c *Config) Validate() error {
 
 // EnsureUserThemeDir 建好用户主题目录，让人知道往哪放自己的主题。
 func EnsureUserThemeDir() error {
-	return os.MkdirAll(filepath.Join(paths.UserThemes()), 0o755)
+	return os.MkdirAll(paths.UserThemes(), 0o755)
 }

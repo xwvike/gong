@@ -1,18 +1,8 @@
-// Package tui 是 gong set：一屏之内把定时增删改查完，外加一个可搜索的主题库。
-//
-// 组件选型：
-//   - bubbles/table   定时列表——列对齐、光标、滚动都不用自己算
-//   - bubbles/list    主题库——自带 "/" 模糊搜索、分页、状态栏
-//   - bubbles/textinput 编辑标签——光标和编辑键位都交给它
-//   - bubbles/help    底部按键提示——按 ? 能展开全部，不用手写两份文案
-//
-// 时间和星期两个字段依然是方向键调，不给文本框：
-// 一旦能自由输入，就得挡住"18:99"这种非法值，纯步进器省掉这整套校验。
+// Package tui 实现定时管理和主题浏览界面。
 package tui
 
 import (
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 
@@ -26,6 +16,7 @@ import (
 	"github.com/xwvike/gong/internal/agent"
 	"github.com/xwvike/gong/internal/config"
 	"github.com/xwvike/gong/internal/paths"
+	"github.com/xwvike/gong/internal/player"
 	"github.com/xwvike/gong/internal/theme"
 )
 
@@ -85,10 +76,11 @@ type Model struct {
 
 	width, height int
 
-	changed bool
-	save    bool
-	status  string
-	isErr   bool
+	changed   bool
+	save      bool
+	quitArmed bool
+	status    string
+	isErr     bool
 }
 
 // Run 打开 TUI。返回 true 表示配置被改过、需要保存并接管 launchd。
@@ -156,8 +148,7 @@ func newThemeList(themes []theme.Theme) list.Model {
 	for i, t := range themes {
 		items[i] = themeItem{t}
 	}
-	// 主题只剩一个名字，没有第二行可写——关掉描述行并把每条压到 1 行、
-	// 条间不留空。留着默认的两行会在每个名字下面空出一条，看着像渲染坏了。
+	// 主题仅展示名称，每项占一行。
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = false // 关掉后 Height() 恒为 1，不用再 SetHeight
 	delegate.SetSpacing(0)           // 默认条间留 1 行，三个名字会散成一屏
@@ -165,22 +156,18 @@ func newThemeList(themes []theme.Theme) list.Model {
 		Foreground(colAmber).BorderForeground(colAmber)
 
 	l := list.New(items, delegate, 0, 0)
-	// 顶上的 tab 栏已经把「主题库」高亮出来了，list 再画一遍标题是重复的；
-	// 定时那一屏也是直接铺 table.View()，不带自己的标题。条数同理，三个名字
-	// 一眼数得过来。两个都关掉，tab 栏底下直接就是主题名。
+	// 标题和帮助由外层统一渲染。
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)       // 帮助统一走底部 help.Model，不要两份footer
 	l.SetShowPagination(false) // 装不下时 applyLayout 会再打开
-	// 退出统一走 root 的 q；list 自带的 Quit/ForceQuit 会直接扔 tea.Quit，
-	// 连过滤输入时按 ctrl+c 都拦不住，必须先卸载。
+	// 退出由根模型处理，确保未保存改动会先确认。
 	l.KeyMap.Quit = key.NewBinding()
 	l.KeyMap.ForceQuit = key.NewBinding()
 	return l
 }
 
-// newLabelInput 编辑的是标签，不是身份——不必挡任何字符，留空也完全合法
-// （等于不要标签，回落显示 "#N"），所以没有 Validate。
+// newLabelInput 接受可为空的展示标签。
 func newLabelInput() textinput.Model {
 	ti := textinput.New()
 	ti.Prompt = "标签 › "
@@ -218,8 +205,7 @@ func (m *Model) refreshTable() {
 		if label == "" {
 			label = "—" // 标签可选，没有就留个占位符，别显示成空白像渲染坏了
 		}
-		// 主题找不到时不在这儿标记——表格单元格不能塞颜色（见 styles.go 的注释），
-		// 干巴巴加个 "!" 后缀反而看着像输入错误。详情走 View() 里单独一行的告警。
+		// 主题资源错误由表格外的状态行显示。
 		rows = append(rows, table.Row{dot, fmt.Sprintf("#%d", i+1), label, s.At, s.WeekdaysLabel(), s.Theme, wake})
 	}
 	cursor := m.table.Cursor()
@@ -251,12 +237,7 @@ func (m *Model) resize(w, h int) {
 	m.applyLayout()
 }
 
-// applyLayout 用当前终端尺寸重新摆放 table/list/help。
-//
-// 表格高度特意夹到「实际行数」，不是无脑塞满剩余空间——
-// 两条定时配一个能显示 26 行的 viewport，会在下面拖出一大片空白，
-// 比原来手写 fmt.Sprintf 那版还难看。行数超出可用空间时才需要滚动，
-// 这时候才让它长到 contentH。
+// applyLayout 按内容量和终端尺寸约束 table/list/help 高度。
 func (m *Model) applyLayout() {
 	w, h := m.width, m.height
 	m.help.Width = w
@@ -268,22 +249,16 @@ func (m *Model) applyLayout() {
 	}
 	contentH := max(3, h-chrome-editH)
 
-	// table.SetHeight(h) 内部会先减掉表头那一行（h - lipgloss.Height(headersView)）
-	// 才是真正的可见数据行数，传行数本身会导致少显示一行——传之前踩过。
+	// table 高度包含表头，因此数据行数需要额外加一。
 	wantRows := max(1, len(m.cfg.Schedules))
 	m.table.SetWidth(w)
 	m.table.SetHeight(min(contentH, wantRows+1))
 
-	// list.View() 把内容区强制 .Height(availHeight) 渲染，主题没那么多条时
-	// 剩下的高度全用空行填——跟上面表格是同一类坑。listChrome 是实测量出来的
-	// 常数：标题栏和条数栏都关了，分页区也关了，只剩标题栏那一行占位——它是留给
-	// "/" 过滤输入框的，即使 SetShowTitle(false) 也照样占一行，去不掉。
+	// list 始终为过滤输入框保留一行。
 	const listChrome = 1
 	itemLines := max(1, len(m.themes)) // delegate 压成了 1 行/条、条间无间距
 
-	// 主题多到一屏放不下时才把翻页点放回来：没有它，超出的主题会被静默截断，
-	// 光标翻到下一页也毫无提示。装得下就关掉，省下它那两行（spacing=0 时
-	// bubbles 会给分页区补一个 MarginTop(1)）。
+	// 仅在内容溢出时显示分页提示。
 	m.list.SetShowPagination(itemLines+listChrome > contentH)
 	m.list.SetSize(w, min(contentH, itemLines+listChrome))
 }
@@ -304,23 +279,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeLabel:
+		m.quitArmed = false
 		return m.updateLabel(msg)
 	case modeConfirmDelete:
+		m.quitArmed = false
 		return m.updateConfirm(msg)
 	}
 
 	// 主题库过滤输入中：所有按键原样转发给 list，
 	// 包括 esc/enter，它们此刻是「取消过滤」「应用过滤」，不是本 app 的含义。
 	if m.tab == tabThemes && m.list.SettingFilter() {
+		m.quitArmed = false
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
 		return m, cmd
 	}
 
 	// 全局键：退出、保存、帮助——任何浏览态下都认，编辑/改标签/确认删除已在上面拦掉。
-	switch {
-	case key.Matches(msg, m.keys.Quit):
+	if key.Matches(msg, m.keys.Quit) {
 		return m.handleQuit()
+	}
+	m.quitArmed = false
+	switch {
 	case key.Matches(msg, m.keys.Save):
 		return m.handleSave()
 	case key.Matches(msg, m.keys.Help):
@@ -352,10 +332,10 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleQuit() (tea.Model, tea.Cmd) {
-	if m.changed {
+	if m.changed && !m.quitArmed {
 		m.status = "有未保存的改动，按 s 保存退出，再按一次 q 放弃"
 		m.isErr = false
-		m.changed = false // 第二次 q 就真走了
+		m.quitArmed = true
 		return m, nil
 	}
 	return m, tea.Quit
@@ -363,6 +343,22 @@ func (m Model) handleQuit() (tea.Model, tea.Cmd) {
 
 func (m Model) handleSave() (tea.Model, tea.Cmd) {
 	if err := m.cfg.Validate(); err != nil {
+		m.status = "存不了：" + err.Error()
+		m.isErr = true
+		return m, nil
+	}
+	available := make(map[string]bool, len(m.themes))
+	for _, th := range m.themes {
+		available[th.ID] = true
+	}
+	for i, schedule := range m.cfg.Schedules {
+		if schedule.Enabled && !available[schedule.Theme] {
+			m.status = fmt.Sprintf("存不了：%s 的主题 %q 找不到", schedule.Ref(i), schedule.Theme)
+			m.isErr = true
+			return m, nil
+		}
+	}
+	if err := agent.ValidateTriggerSlots(m.cfg); err != nil {
 		m.status = "存不了：" + err.Error()
 		m.isErr = true
 		return m, nil
@@ -519,12 +515,7 @@ func (m *Model) bump(s *config.Schedule, dir int) {
 	m.refreshTable()
 }
 
-// defaultThemeID 新建定时时预选哪个主题。
-//
-// 优先 config.DefaultTheme，找不到才回落到列表第一个。之前直接用
-// m.themes[0]，而 theme.List() 是按 ID 字母序排的——用户往
-// ~/.config/gong/themes 里丢一个叫 "aaa" 的主题，新建定时就悄悄改用它了。
-// 回落分支必须留着：内置目录整个丢了的时候 default 也解析不开。
+// defaultThemeID 优先选择默认主题，缺失时回落到首个可用主题。
 func (m *Model) defaultThemeID() string {
 	for _, t := range m.themes {
 		if t.ID == config.DefaultTheme {
@@ -545,8 +536,7 @@ func (m *Model) themeIndexOf(id string) int {
 
 func wrap(v, n int) int { return ((v % n) + n) % n }
 
-// updateLabel 编辑的是可选标签，没有任何值需要拒绝——留空就是不要标签，
-// 跟别的定时重字也无所谓。没有校验分支，所以也不用「留在原地重试」那一套。
+// updateLabel 接受空值和重复值。
 func (m Model) updateLabel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
@@ -638,14 +628,10 @@ func (m Model) previewSchedule() (string, bool) {
 }
 
 func (m Model) previewTheme(th theme.Theme) (string, bool) {
-	overlay := paths.Overlay()
-	if overlay == "" {
-		return "找不到 gong-overlay", true
+	cmd, err := player.PreviewCommand(th)
+	if err != nil {
+		return err.Error(), true
 	}
-	cmd := exec.Command(overlay, "--force",
-		"--lead", fmt.Sprint(th.LeadSeconds()),
-		"--timeout", fmt.Sprint(th.TimeoutSeconds()),
-		"--tag", "vis", "--theme", th.HTML)
 	if err := cmd.Start(); err != nil {
 		return err.Error(), true
 	}

@@ -12,7 +12,7 @@ import (
 	"github.com/xwvike/gong/internal/theme"
 )
 
-// 两个假主题，不依赖磁盘上真实的 themes/ 目录，专门用来驱破选主题的往返流程。
+// fakeThemes 避免测试依赖磁盘主题。
 func fakeThemes() []theme.Theme {
 	return []theme.Theme{
 		{ID: "alpha", HTML: "/dev/null", Meta: theme.Meta{Lead: 0, Duration: 5}},
@@ -20,10 +20,9 @@ func fakeThemes() []theme.Theme {
 	}
 }
 
-// Label 在这里纯粹是给测试断言当区分标记用的，不代表它必须唯一或必须存在——
-// 生产代码里身份靠位置（序号），标签完全可选。
+// 测试用标签只用于区分断言对象。
 func twoSchedules() *config.Config {
-	return &config.Config{Version: 1, Schedules: []config.Schedule{
+	return &config.Config{Version: config.CurrentVersion, Schedules: []config.Schedule{
 		{Label: "noon", At: "12:00:00", Weekdays: []int{1, 2, 3, 4, 5}, Theme: "alpha", Enabled: true, Grace: config.DefaultGrace},
 		{Label: "evening", At: "18:00:00", Weekdays: []int{1, 2, 3, 4, 5}, Theme: "beta", Enabled: true, Grace: config.DefaultGrace},
 	}}
@@ -38,8 +37,7 @@ func startModel(t *testing.T, c *config.Config) *teatest.TestModel {
 	return tm
 }
 
-// waitForRender 等第一帧真的画出来，避免在程序还没处理完初始 WindowSizeMsg
-// 前就发按键——这类竞态在 teatest 里不等一下会偶发失败。
+// waitForRender 避免按键早于初始 WindowSizeMsg。
 func waitForRender(t *testing.T, tm *teatest.TestModel) {
 	t.Helper()
 	teatest.WaitFor(t, tm.Output(), func(out []byte) bool {
@@ -69,13 +67,7 @@ func finalModel(t *testing.T, tm *teatest.TestModel) Model {
 	return m
 }
 
-// 表格第一列展示的是序号，不是名字——这是这一版最核心的行为，
-// 值得单独断言渲染结果里真的有 #1/#2，而不是只测数据层面的字段。
-//
-// 不能借 startModel：它内部的 waitForRender 会把第一帧的字节从流里读干净
-// （teatest.Output() 背后是同一个 bytes.Buffer，读了就没了），"#1"/"#2"
-// 恰好也在那第一帧里，等 startModel 返回时已经被排干，后面再等就是等一辈子。
-// 所以这里手动搭一遍，把「等出现」和「等 #1/#2」合成同一次 WaitFor。
+// 直接读取首帧，因为 startModel 会消费包含序号的输出缓冲区。
 func TestTableShowsSequenceNumbers(t *testing.T) {
 	c := twoSchedules()
 	m := newModel(c, fakeThemes())
@@ -349,6 +341,57 @@ func TestQuitRequiresSecondPressAfterUnsavedChange(t *testing.T) {
 	tm2.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
 }
 
+func TestSaveStillWorksAfterQuitWarning(t *testing.T) {
+	c := twoSchedules()
+	tm := startModel(t, c)
+
+	tm.Send(space())
+	tm.Send(runes("q"))
+	waitForOutput(t, tm, "未保存的改动")
+	tm.Send(runes("s"))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+
+	fm := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second))
+	m := fm.(Model)
+	if !m.save || !m.changed {
+		t.Fatalf("q 后保存丢失状态：save=%v changed=%v", m.save, m.changed)
+	}
+}
+
+func TestQuitWarningRearmsAfterAnotherAction(t *testing.T) {
+	m := newModel(twoSchedules(), fakeThemes())
+	m.changed = true
+
+	model, cmd := m.updateKey(runes("q"))
+	m = model.(Model)
+	if cmd != nil || !m.quitArmed {
+		t.Fatalf("第一次 q 应进入待确认状态：cmd=%v armed=%v", cmd, m.quitArmed)
+	}
+
+	model, _ = m.updateKey(runes("?"))
+	m = model.(Model)
+	if m.quitArmed {
+		t.Fatal("继续操作后应取消退出确认")
+	}
+
+	model, cmd = m.updateKey(runes("q"))
+	m = model.(Model)
+	if cmd != nil || !m.quitArmed {
+		t.Fatalf("继续操作后的 q 应重新警告：cmd=%v armed=%v", cmd, m.quitArmed)
+	}
+}
+
+func TestSaveRejectsConflictingTriggerSlots(t *testing.T) {
+	c := twoSchedules()
+	c.Schedules[1].At = "12:00:30"
+	c.Schedules[1].Theme = "alpha"
+	tm := startModel(t, c)
+
+	tm.Send(runes("s"))
+	waitForOutput(t, tm, "触发时间冲突")
+	finalModel(t, tm)
+}
+
 func TestSaveFailsValidationWithoutQuitting(t *testing.T) {
 	c := twoSchedules()
 	c.Schedules[0].Weekdays = nil // 手工构造一条校验会挂的配置
@@ -365,9 +408,7 @@ func TestSaveFailsValidationWithoutQuitting(t *testing.T) {
 	}
 }
 
-// 新建定时预选哪个主题。之前直接取 m.themes[0]，而 theme.List() 是按 ID
-// 字母序排的——用户往 ~/.config/gong/themes 丢一个叫 "aaa" 的主题，新建定时
-// 就悄悄改用它了。fakeThemes 的字母序第一个是 alpha，正好能逮住这个回归。
+// 新定时应优先使用默认主题，而非字母序第一项。
 func TestAddUsesDefaultThemeNotAlphabeticalFirst(t *testing.T) {
 	withDefault := append(fakeThemes(), theme.Theme{
 		ID: config.DefaultTheme, HTML: "/dev/null",
@@ -375,8 +416,7 @@ func TestAddUsesDefaultThemeNotAlphabeticalFirst(t *testing.T) {
 	})
 	c := twoSchedules()
 
-	// 走真实的 "a" 按键路径，不是只测 defaultThemeID() 本身——回归发生在
-	// 调用点（那里曾经写死 m.themes[0]），只测辅助函数是逮不住的。
+	// 覆盖真实新增路径，而非只测辅助函数。
 	tm := teatest.NewTestModel(t, newModel(c, withDefault),
 		teatest.WithInitialTermSize(100, 32))
 	t.Cleanup(func() { _ = tm.Quit() })

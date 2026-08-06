@@ -13,7 +13,6 @@ class Gong < Formula
     bin.install "gong"
     bin.install "gong-overlay"
     pkgshare.install "themes"
-    doc.install "doc.md" if File.exist?("doc.md")
   end
 
   test do

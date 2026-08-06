@@ -47,8 +47,7 @@ func TestComputeTrigger(t *testing.T) {
 	}
 }
 
-// sched 造一条测试用定时。label 留空是常态——身份不再靠名字，
-// 靠它在 c.Schedules 里的位置，所以断言时按 Theme 或位置区分，不按名字。
+// sched 创建一条测试定时。
 func sched(label, at string, days []int) config.Schedule {
 	return config.Schedule{Label: label, At: at, Weekdays: days,
 		Theme: "default", Enabled: true, Grace: config.DefaultGrace}
@@ -59,7 +58,7 @@ func mon(h, m, s int) time.Time {
 	return time.Date(2026, 7, 27, h, m, s, 0, time.Local)
 }
 
-func TestMatch(t *testing.T) {
+func TestMatchTargetUsesLatestPastTrigger(t *testing.T) {
 	workdays := []int{1, 2, 3, 4, 5}
 	c := &config.Config{Schedules: []config.Schedule{
 		sched("noon", "12:00:00", workdays),
@@ -74,14 +73,16 @@ func TestMatch(t *testing.T) {
 		{"正点在中午", mon(12, 0, 0), "noon"},
 		{"中午晚了两秒", mon(12, 0, 2), "noon"},
 		{"正点在傍晚", mon(18, 0, 0), "evening"},
-		{"下午两点更靠近中午", mon(14, 0, 0), "noon"},      // 距 12:00 两小时，距 18:00 四小时
-		{"下午四点半更靠近傍晚", mon(16, 30, 0), "evening"}, // 距 18:00 一个半小时
-		// 睡醒后 launchd 补跑：这里猜谁都行，壳的时间窗会挡掉，不能 panic
+		{"下午不会提前匹配傍晚", mon(16, 30, 0), "noon"},
 		{"深夜补跑仍能给出一条", mon(23, 50, 0), "evening"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Match(c, tc.now)
+			result := MatchTarget(c, tc.now)
+			if result == nil {
+				t.Fatal("没匹配到任何定时")
+			}
+			got := result.Schedule
 			if got == nil {
 				t.Fatal("没匹配到任何定时")
 			}
@@ -98,7 +99,11 @@ func TestMatchSkipsDisabled(t *testing.T) {
 		sched("evening", "18:00:00", []int{1}),
 	}}
 	c.Schedules[0].Enabled = false
-	got := Match(c, mon(12, 0, 0))
+	result := MatchTarget(c, mon(12, 0, 0))
+	if result == nil {
+		t.Fatal("没匹配到任何定时")
+	}
+	got := result.Schedule
 	if got == nil || got.Label != "evening" {
 		t.Fatalf("停用的定时不该被匹配到，拿到 %v", got)
 	}
@@ -107,15 +112,12 @@ func TestMatchSkipsDisabled(t *testing.T) {
 func TestMatchNoneEnabled(t *testing.T) {
 	c := &config.Config{Schedules: []config.Schedule{sched("noon", "12:00:00", []int{1})}}
 	c.Schedules[0].Enabled = false
-	if got := Match(c, mon(12, 0, 0)); got != nil {
+	if got := MatchTarget(c, mon(12, 0, 0)); got != nil {
 		t.Fatalf("一条启用的都没有时应该返回 nil，拿到 %v", got)
 	}
 }
 
-// withLeadTheme 在临时 HOME 下放一个只带 lead 值的假主题，
-// 让跨午夜这类测试不用绑死仓库里恰好有哪个真主题——
-// 之前这里直接写死 "nixie"，nixie 被删掉的时候这两个测试也跟着断了，
-// 测试本该测的是反查算法，不该因为换了套主题就要跟着改。
+// withLeadTheme 创建不依赖仓库内置资源的测试主题。
 func withLeadTheme(t *testing.T, lead int) string {
 	t.Helper()
 	home := t.TempDir()
@@ -157,16 +159,6 @@ func TestMatchAcrossMidnight(t *testing.T) {
 	}
 }
 
-func TestTargetForUsesNearestAbsoluteDate(t *testing.T) {
-	s := sched("mid", "00:00:02", []int{1})
-	s.Theme = withLeadTheme(t, 5)
-	now := time.Date(2026, 7, 26, 23, 59, 10, 0, time.Local)
-	want := time.Date(2026, 7, 27, 0, 0, 2, 0, time.Local)
-	if got := TargetFor(s, now); !got.Equal(want) {
-		t.Fatalf("TargetFor = %s，想要 %s", got, want)
-	}
-}
-
 func TestPlistMergesAllSchedules(t *testing.T) {
 	c := &config.Config{Schedules: []config.Schedule{
 		sched("noon", "12:00:00", []int{1, 2}),
@@ -204,6 +196,41 @@ func TestPlistDedupesSameMinute(t *testing.T) {
 	out := string(Plist("/opt/homebrew/bin/gong", c.Schedules))
 	if n := strings.Count(out, "<key>Weekday</key>"); n != 1 {
 		t.Errorf("同一分钟的触发点 %d 个，应该去重成 1 个", n)
+	}
+}
+
+func TestValidateScheduleSetRejectsSameTriggerSlot(t *testing.T) {
+	themeID := withLeadTheme(t, 0)
+	c := &config.Config{Version: config.CurrentVersion, Schedules: []config.Schedule{
+		{Label: "a", At: "12:00:00", Weekdays: []int{1}, Theme: themeID, Enabled: true, Grace: 10},
+		{Label: "b", At: "12:00:30", Weekdays: []int{1}, Theme: themeID, Enabled: true, Grace: 10},
+	}}
+	err := ValidateScheduleSet(c)
+	if err == nil || !strings.Contains(err.Error(), "触发时间冲突") {
+		t.Fatalf("ValidateScheduleSet() error = %v, want trigger conflict", err)
+	}
+}
+
+func TestValidateScheduleSetReportsMissingThemeBeforeSlotConflict(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := &config.Config{Version: config.CurrentVersion, Schedules: []config.Schedule{
+		{Label: "a", At: "12:00:00", Weekdays: []int{1}, Theme: "missing-theme", Enabled: true, Grace: 10},
+		{Label: "b", At: "12:00:30", Weekdays: []int{1}, Theme: "missing-theme", Enabled: true, Grace: 10},
+	}}
+	err := ValidateScheduleSet(c)
+	if err == nil || !strings.Contains(err.Error(), "主题") || strings.Contains(err.Error(), "触发时间冲突") {
+		t.Fatalf("ValidateScheduleSet() error = %v, want missing theme error", err)
+	}
+}
+
+func TestMatchTargetDoesNotChooseFutureScheduleAfterDelay(t *testing.T) {
+	c := &config.Config{Schedules: []config.Schedule{
+		sched("current", "12:00:00", []int{1}),
+		sched("next", "12:01:00", []int{1}),
+	}}
+	got := MatchTarget(c, mon(12, 0, 40))
+	if got == nil || got.Schedule.Label != "current" {
+		t.Fatalf("延迟启动匹配到 %v，想要 current", got)
 	}
 }
 
@@ -269,7 +296,7 @@ func TestWritePlistReplacesFileWithoutLeavingTemp(t *testing.T) {
 
 func TestSyncRejectsInvalidConfigBeforeWriting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	c := &config.Config{Schedules: []config.Schedule{{
+	c := &config.Config{Version: config.CurrentVersion, Schedules: []config.Schedule{{
 		At: "25:00", Weekdays: []int{1}, Theme: "default", Enabled: true,
 	}}}
 	res := Sync(c, "/tmp/gong")
@@ -278,5 +305,35 @@ func TestSyncRejectsInvalidConfigBeforeWriting(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.PlistFile()); !os.IsNotExist(err) {
 		t.Fatalf("invalid config wrote a plist: %v", err)
+	}
+}
+
+func TestSyncDoesNotMutateLaunchAgentsWhenThemeValidationFails(t *testing.T) {
+	themeID := withLeadTheme(t, 0)
+	if err := os.MkdirAll(paths.LaunchAgents(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.PlistFile(), []byte("existing plist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacy := paths.LegacyPlistFile("old")
+	if err := os.WriteFile(legacy, []byte("legacy plist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &config.Config{Version: config.CurrentVersion, Schedules: []config.Schedule{
+		{At: "12:00", Weekdays: []int{1}, Theme: themeID, Enabled: true},
+		{At: "18:00", Weekdays: []int{1}, Theme: "missing-theme", Enabled: true},
+	}}
+
+	res := Sync(c, "/tmp/gong")
+	if len(res.Errors) != 1 {
+		t.Fatalf("Sync() errors = %v, want one theme error", res.Errors)
+	}
+	got, err := os.ReadFile(paths.PlistFile())
+	if err != nil || string(got) != "existing plist" {
+		t.Fatalf("current plist changed after validation failure: %q, %v", got, err)
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		t.Fatalf("legacy plist removed before validation completed: %v", err)
 	}
 }

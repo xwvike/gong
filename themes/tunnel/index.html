@@ -32,9 +32,7 @@
      JS 万一没跑起来时的兜底。 */
   .word, #measurer {
     white-space: pre;
-    /* 原 props 指定 Inter。主题不能发外部请求，也没随包带字体文件，
-       所以走系统字体——WKWebView 里 -apple-system 就是 SF Pro，
-       同样是几何无衬线，大字号下的观感跟 Inter 很接近。 */
+    /* 主题不发外部请求，优先使用系统字体。 */
     font-family: -apple-system, "SF Pro Display", "Helvetica Neue", Inter, sans-serif;
     font-weight: 700;
     font-size: max(3rem, min(15vw, 42vh));
@@ -43,14 +41,7 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* 元素只包住文字本身，再用 translate(-50%,-50%) 居中——不要用
-     inset:0 + flex 居中那种「铺满整屏再把字摆中间」的写法。
-     两个原因：
-       1. will-change 会把它提升成独立合成层，铺满整屏意味着层的
-          backing store 是整屏大小，放大 35 倍时代价惊人；包住文字
-          之后层面积只有字那么大。
-       2. 满屏的层边界压在半透明的压暗层上，合成时边缘会透出一个
-          淡淡的矩形——实测截图里能看见。 */
+  /* 合成层只包住文字，避免创建整屏 backing store 和可见层边界。 */
   .word {
     position: absolute; left: 50%; top: 50%;
     color: #FFFFFF;
@@ -97,28 +88,20 @@
     return pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
-  // ── 原组件的 props 在这里变成写死的配置。静态主题没有调用方，
-  //    想改文案节奏就直接改这一段。 ────────────────────────────
+  // ── 配置 ────────────────────────────────────────────────────
   const CONFIG = {
-    // 原组件 maxScale 默认 35：退场的词要冲出视口才有「穿过去」的感觉。
+    // 退场文字放大到穿出视口。
     maxScale: 35,
-    // 进退场时长。原组件 transition 里那堆 stiffness/damping/mass 是死参数
-    // ——type 是 "tween" 的时候 framer-motion 根本不看它们，真正生效的只有
-    // duration 和 ease，所以这里就只留这两个，CSS 一比一对得上。
     enterMs: 1200,
     ease: 'cubic-bezier(.7, 0, .25, 1)',
 
-    // 到点之后依次放的牌。holdMs 是从这张牌【被推出去】算起、到下一张牌
-    // 进场为止的间隔，所以它必须大于 enterMs，否则上一张还没飞到位就被顶掉。
-    // 想加一张牌就往这个数组里塞一项，不用动下面的流程。
+    // holdMs 必须大于 enterMs，避免相邻终场文字互相顶掉。
     finale: [
       { text: target => formatClock(target), holdMs: 1900 },
       { text: () => 'CLOCK OUT',             holdMs: 2100 },
     ],
 
-    // 拿不到 g.lead 时倒数从几开始。正常情况下这个值直接跟着 theme.toml 的
-    // lead 走（见下面的 countFrom）——写死成 3 而 lead 被改成 10 的话，
-    // 前 7 秒就是一片什么都没有的压暗，看着像主题坏了。
+    // g.lead 不可用时的倒数起点。
     countFromFallback: 3,
 
     // 字最宽占视口的多少。长文案（CLOCK OUT）按这个上限缩字号。
@@ -131,15 +114,10 @@
 
   // ── 字号自适应 ────────────────────────────────────────────
   //
-  // 数字只有一个字符，"CLOCK OUT" 有九个——同一个字号下后者会顶出屏幕。
-  // 原组件是靠一个隐藏的「最长文案」撑开容器宽度来回避的，那套在
-  // 全屏浮层上不适用（容器本来就是整屏）。这里改成量出文字在基准字号下
-  // 的实际宽度，再等比缩到视口允许的范围内。
+  // 测量实际文本宽度，再等比缩到视口范围内。
   const MEASURE_PX = 100;
   function fitFontSize(text) {
-    // 基准字号纯按比例走，不设绝对上限——之前卡了个 288px，4K 屏上「3」
-    // 只占 4% 屏宽，小得不像个宣告。vh 那一路是给超宽屏兜底的：
-    // 5120×1440 这种比例下 15vw 会比屏幕还高。
+    // vw 决定常规尺寸，vh 为超宽屏限制高度。
     const base = Math.max(48, Math.min(innerWidth * .15, innerHeight * .42));
     measurer.style.fontSize = MEASURE_PX + 'px';
     measurer.textContent = text;
@@ -150,17 +128,8 @@
   }
 
   // ── 隧道本体 ──────────────────────────────────────────────
-  //
-  // 原组件用两个 slot 来回倒，每次换词都要 await 上一段动画 settle，
-  // 靠的是 hold + duration 永远不重叠。gong 这边节奏是由绝对时间定的
-  // （每整秒换一个数字），1 秒的间隔比 1.2 秒的过渡短，两个 slot 必然
-  // 撞车——一个还在飞出去就得被当成下一个词重新用。
-  //
-  // 所以改成一个词一个节点：新词进场时只是叫上一个词开始飞出去，不等它。
-  // 被打断的词就带着当前的 scale 继续往外飞（CSS 过渡本来就能从中途接管），
-  // 屏幕上同时有好几个词在不同深度飞，反而更像隧道。
-  // 节点回收不挂 transitionend，统一在 onTick 里按绝对时间扫——
-  // 全场只有一个时钟。
+  // 每个词使用独立节点，允许一秒倒数与 1.2 秒过渡自然重叠。
+  // 节点按宿主绝对时间回收，不依赖 transitionend。
   const flying = [];
   let current = null;
 
@@ -206,8 +175,7 @@
 
   // ── 生命周期 ──────────────────────────────────────────────
   //
-  // 所有时间线全部问 g.now，不问 setTimeout：页面是提前加载好的，
-  // 亮相可能发生在加载后很久，数心跳会越数越偏。
+  // 所有时间线使用 g.now，不依赖页面加载时刻。
   let revealedAt = 0;
   let lastCount = 0;
   let stageIdx = -1;      // finale 里当前是第几张牌
@@ -215,12 +183,10 @@
   let leavingAt = 0;
   let doneSent = false;
 
-  // 倒数几个数由壳注入的 lead 决定，不另写一份。lead 是 0（到点才亮相）
-  // 时下面的 left < 1 会让倒数整段跳过，直接等 onFire。
+  // 倒数起点跟随宿主注入的 lead。
   const countFrom = Math.max(1, Math.round(Number(g.lead) || CONFIG.countFromFallback));
 
-  // 倒数显示的是「现算出来的剩余秒数」，不是「第几次心跳」。
-  // 心跳抖动、页面卡顿、甚至整段掉帧，数字都还是对的。
+  // 每次按绝对时间重算剩余秒数，允许心跳跳帧。
   function tickCountdown(now) {
     const left = Math.ceil((g.target - now) / 1000);
     if (left < 1 || left > countFrom) return;
@@ -237,8 +203,7 @@
 
   g.onReveal = () => {
     revealedAt = g.now;
-    // 迟到才亮相（补发路径）时不用特判：tickCountdown 里的 left < 1 已经
-    // 把它挡掉了。壳的状态字段一个都不读，只读时间。
+    // 迟到亮相时 left < 1 会跳过倒数。
     tickCountdown(g.now);
   };
 

@@ -1,6 +1,2 @@
-# 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
-desc      = "红色点阵 LED 信号板贴在屏幕顶部，滚动显示当前时间和 CLOCK OUT，带真实信号板的闪烁和辉光。"
 lead      = 0      # 整点直接出现，不需要提前亮相
 duration  = 7      # 可见 6.4s + 收尾 0.5s，留点余量
-placement = "edge" # 贴顶一条窄带，不挡视线中央
-webgl     = false   # 用的是 2D canvas，不是 WebGL

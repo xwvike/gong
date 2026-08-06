@@ -2,11 +2,7 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// TUI 自己的调色板，刻意不跟任何主题挂钩。
-//
-// 主题是可增可删的外部资源，TUI 是宿主——从某个具体主题里取色，
-// 那个主题被删或改配色之后这里就成了悬空引用（上一版注释就指着一个
-// 已经不存在的 --amber 变量）。琥珀是 gong 自己的强调色，仅此而已。
+// TUI 使用独立调色板，不依赖可增删的主题资源。
 var (
 	colAmber = lipgloss.Color("214")
 	colDim   = lipgloss.Color("240")
@@ -21,10 +17,7 @@ var (
 	styleDim   = lipgloss.NewStyle().Foreground(colDim)
 	styleErr   = lipgloss.NewStyle().Foreground(colRed)
 	styleOn    = lipgloss.NewStyle().Foreground(colGreen)
-	// styleField 标出编辑面板里当前聚焦的那个字段。
-	// 故意不加 Padding：这些字段大多是冒号连着的紧凑文本（12:00:00、一二三四五），
-	// 加左右留白会把邻居的字符顶开一格，破坏对齐——之前就因为这个把 "12:00:00"
-	// 挤成过 "12: 00 :00"，靠背景色区分聚焦态就够了。
+	// 聚焦字段不加 Padding，避免破坏紧凑时间文本的对齐。
 	styleField  = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
 	styleTabOn  = lipgloss.NewStyle().Foreground(colAmber).Bold(true).Underline(true).Padding(0, 1)
 	styleTabOff = lipgloss.NewStyle().Foreground(colDim).Padding(0, 1)

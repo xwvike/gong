@@ -1,16 +1,9 @@
-// gong —— 定时全屏浮层提醒。
-//
-// 分层：
-//
-//	壳 (gong-overlay)  计时、拉起主题、给主题提供能力
-//	Go (gong)          配置、TUI、launchd 接管
-//	主题                纯 HTML/CSS，表现力在设计上
-//
-// 常驻进程数为 0：launchd 本来就在跑，到点拉起 gong fire，播完自杀。
+// gong 管理全屏提醒的配置、主题和 launchd 调度。
 package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +16,7 @@ import (
 	"github.com/xwvike/gong/internal/agent"
 	"github.com/xwvike/gong/internal/config"
 	"github.com/xwvike/gong/internal/paths"
+	"github.com/xwvike/gong/internal/player"
 	"github.com/xwvike/gong/internal/theme"
 	"github.com/xwvike/gong/internal/tui"
 )
@@ -171,15 +165,13 @@ func cmdOff() error {
 		fmt.Println("本来就没装。")
 	}
 	fmt.Println("配置留在", paths.ConfigFile(), "——再跑 gong on 就能装回来。")
+	if len(errs) > 0 {
+		return fmt.Errorf("launchd 清理未完成：%w", errors.Join(errs...))
+	}
 	return nil
 }
 
-// cmdUninstall 是「我不要这个东西了」的一条龙。
-//
-// 存在的理由：formula 没有 uninstall hook，`brew uninstall` 不会清
-// ~/Library/LaunchAgents 里的 plist。光靠 caveats 提醒用户先跑 gong off
-// 是不够的——没人看 caveats，留下的 plist 会每天到点去拉一个不存在的二进制，
-// 而且是静默失败。所以把清理和卸载合成一条命令，让人没机会漏掉前半截。
+// cmdUninstall 同时清理 launchd；Homebrew formula 没有 uninstall hook。
 func cmdUninstall(args []string) error {
 	purge, yes := false, false
 	for _, a := range args {
@@ -224,13 +216,15 @@ func cmdUninstall(args []string) error {
 	for _, e := range errs {
 		fmt.Fprintln(os.Stderr, "  !", e)
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("launchd 清理未完成，已中止卸载：%w", errors.Join(errs...))
+	}
 
 	if purge {
 		if err := os.RemoveAll(paths.ConfigDir()); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintln(os.Stderr, "  ! 删配置失败：", err)
-		} else {
-			fmt.Println("已删除", paths.ConfigDir())
+			return fmt.Errorf("删配置失败：%w", err)
 		}
+		fmt.Println("已删除", paths.ConfigDir())
 	}
 
 	if brewPath == "" {
@@ -250,9 +244,7 @@ func cmdUninstall(args []string) error {
 	return syscall.Exec(brewPath, []string{"brew", "uninstall", formulaName}, os.Environ())
 }
 
-// brewInstall 判断当前这个 gong 是不是 brew 装的，是的话返回 brew 的路径和 formula 名。
-// 判据是可执行文件在不在 brew 前缀底下——比问 `brew list` 准，
-// 因为源码编译出来的 gong 和 brew 装的可能同时存在。
+// brewInstall 根据可执行文件位置判断当前 gong 是否由 Homebrew 安装。
 func brewInstall() (brewPath, formula string) {
 	brewPath, err := exec.LookPath("brew")
 	if err != nil {
@@ -321,7 +313,7 @@ func cmdSet() error {
 		fmt.Println("没有改动。")
 		return nil
 	}
-	if err := c.Validate(); err != nil {
+	if err := agent.ValidateScheduleSet(c); err != nil {
 		return err
 	}
 	if err := c.Save(); err != nil {
@@ -376,9 +368,7 @@ func cmdLs() error {
 	return nil
 }
 
-// cmdRm 照 ufw 的路子：身份是序号，序号会因为增删而变——参考 ufw delete <n>
-// 一样没有 ID，靠的是删除前把「即将删除的是哪条」打出来再确认，而不是假装
-// 序号绝对稳定。序号读错了、或者跟 gong ls 那次相比配置已经变了，这一步能兜住。
+// cmdRm 删除前展示当前序号对应的定时，避免配置变化后误删。
 func cmdRm(args []string) error {
 	yes := false
 	var numArg string
@@ -387,6 +377,12 @@ func cmdRm(args []string) error {
 		case "-y", "--yes":
 			yes = true
 		default:
+			if strings.HasPrefix(a, "-") {
+				return fmt.Errorf("不认识的参数 %q（gong rm <序号> [-y]）", a)
+			}
+			if numArg != "" {
+				return fmt.Errorf("参数太多（gong rm <序号> [-y]）")
+			}
 			numArg = a
 		}
 	}
@@ -424,12 +420,7 @@ func cmdRm(args []string) error {
 	return install(c)
 }
 
-// rmPreview 是删除前给人确认的那一行。
-//
-// 序号自己打，不走 Ref：标签是可选的，大多数定时根本没有，而 Ref 在没标签时
-// 正好回落成 "#N"——前面再拼一个 #%d 就成了「即将删除：#2 #2 12:00:00」，
-// 序号打两遍。有标签才把它补在后面。抽成函数纯粹是为了能测：cmdRm 走完确认
-// 之后一定会调 install()，那会真的碰 launchctl，整条路径没法进 go test。
+// rmPreview 始终显示序号，仅在存在标签时追加标签。
 func rmPreview(n int, s config.Schedule) string {
 	line := fmt.Sprintf("即将删除：#%d %s %s  主题 %s", n, s.At, s.WeekdaysLabel(), s.Theme)
 	if s.Label != "" {
@@ -455,21 +446,17 @@ func cmdVis(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("要预览哪个主题？gong vis <theme>（gong themes 看有哪些）")
 	}
+	if len(args) > 1 {
+		return fmt.Errorf("参数太多（gong vis <theme>）")
+	}
 	th, err := theme.Resolve(args[0])
 	if err != nil {
 		return err
 	}
-	overlay := paths.Overlay()
-	if overlay == "" {
-		return fmt.Errorf("找不到 gong-overlay")
+	cmd, err := player.PreviewCommand(th)
+	if err != nil {
+		return err
 	}
-	cmd := exec.Command(overlay,
-		"--force",
-		"--lead", strconv.Itoa(th.LeadSeconds()),
-		"--timeout", strconv.Itoa(th.TimeoutSeconds()),
-		"--tag", "vis",
-		"--theme", th.HTML,
-	)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
@@ -488,14 +475,7 @@ func cmdStop() error {
 	return nil
 }
 
-// cmdFire 是 launchd 的入口。
-//
-// 这里将来要挂「收摊」动作（暂停音乐、shortcuts run 切专注、退 Xcode），
-// 所以让 launchd 调 gong 而不是直接调 gong-overlay。
-// 最后用 syscall.Exec 把自己换成壳，不留多余进程。
-// 任何位置参数一律忽略——0.1.0 遗留的 per-name plist 会传一个名字，
-// 但 Name 这个概念已经不存在了。忽略掉、总是按时间反查，效果是等价的：
-// 反查本来就能推出同一个绝对目标时刻，旧 plist 会在下次 gong on 时被清掉。
+// cmdFire 是 launchd 入口；位置参数仅为兼容旧版 plist 而忽略。
 func cmdFire(_ []string) error {
 	c, err := config.Load()
 	if err != nil {
@@ -524,24 +504,8 @@ func cmdFire(_ []string) error {
 		return fmt.Errorf("找不到 gong-overlay")
 	}
 
-	// TODO 收摊动作在这里跑，跑完再 exec 到壳
-
 	// --tag 只用来给壳的 stderr 打标，不是身份——用序号就够，
 	// 不必依赖一个现在已经不强制存在的标签。
-	argv := overlayArgs(overlay, *s, th, target, fmt.Sprintf("#%d", match.Index+1))
+	argv := player.ScheduledArgs(overlay, *s, th, target, fmt.Sprintf("#%d", match.Index+1))
 	return syscall.Exec(overlay, argv, os.Environ())
-}
-
-// overlayArgs 将一次定时完整地交给壳。--at 保留给旧版壳和人工调用，
-// --target 才是本次触发对应的绝对目标时刻，避免跨午夜时按「今天」解析。
-func overlayArgs(overlay string, s config.Schedule, th theme.Theme, target time.Time, tag string) []string {
-	return []string{overlay,
-		"--at", config.FormatClock(s.Seconds()),
-		"--target", strconv.FormatInt(target.Unix(), 10),
-		"--lead", strconv.Itoa(th.LeadSeconds()),
-		"--grace", strconv.Itoa(s.Grace),
-		"--timeout", strconv.Itoa(th.TimeoutSeconds()),
-		"--tag", tag,
-		"--theme", th.HTML,
-	}
 }

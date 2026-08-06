@@ -1,13 +1,9 @@
-// gong-overlay — 到点在所有屏幕最顶层播一段 HTML 动画，不抢焦点、不吃点击，播完自杀。
+// gong-overlay 在所有屏幕顶层播放无焦点、点击穿透的 HTML 提示。
 // 编译： swiftc -O overlay.swift -o gong-overlay
-// 运行： ./gong-overlay --at 12:00:00 --lead 0 --theme ~/.config/gong/themes/default/index.html
-//        ./gong-overlay --force --theme ./themes/default/index.html      # 预览
-//
-// 这个壳是无状态的：不读配置文件、不认识主题名、不知道有几条定时。
-// 传进来的 flag 全是【什么时候】和【活多久】，没有一个是【长什么样】——
-// 提醒的形式和文案由主题自己决定，壳不参与。
+// 预览： ./gong-overlay --force --theme ./themes/default/index.html
 
 import Cocoa
+import CoreGraphics
 import WebKit
 import Darwin
 
@@ -144,11 +140,7 @@ func parseArgs() -> Options {
         }
         i += 1
     }
-    // 主题路径必须由 Go 侧算好传进来。壳不猜路径：它不读配置、也不知道
-    // 内置主题装在哪（brew 前缀下的 share/gong/themes，只有 Go 侧的 ldflags
-    // 和回落逻辑清楚）。以前这里缺 --theme 会去试 ~/.config/gong/themes/default，
-    // 那既写死了一个主题名，又只猜用户目录——brew 装的内置主题根本不在那儿，
-    // 于是必然报 theme not found，等于用一条更难懂的错误替换掉了真正的原因。
+    // 主题路径由 Go 侧解析；壳不读取配置或猜测安装目录。
     if o.theme.isEmpty {
         reportInvalid("missing --theme")
     }
@@ -167,8 +159,7 @@ func parseClock(_ s: String) -> (h: Int, m: Int, s: Int)? {
     return (h, m, sec)
 }
 
-/// 关键：nonactivatingPanel + 永不成为 key window，这是「盖在上面但不夺焦点」的唯一正解。
-/// 用普通 NSWindow 做不到，用 mpv / Chrome --app 也做不到。
+/// nonactivatingPanel 且永不成为 key window，保证浮层不夺焦点。
 final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -182,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     private var opts = Options()
     private var revealed = false
     private var fired = false
-    /// 本次的目标时刻。心跳要用它做「tick 之前先补 fire」的判断，所以存成属性。
+    /// 心跳用目标时刻保证 fire 先于到点后的首个 tick。
     private var target = Date.distantFuture
     private var finished = false
     private weak var primaryWeb: WKWebView?
@@ -206,8 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             Darwin.exit(1)
         }
 
-        // 先把 panel 建好、页面加载好，但【不 orderFront】——屏幕上什么都没有。
-        // 等到 target - lead 才亮相，这样首帧是零延迟的，不会先闪一下白底。
+        // 提前加载但不展示，直到 target - lead 才亮相。
         let screens = NSScreen.screens
         guard !screens.isEmpty else { Darwin.exit(1) }
         let mainScreen = NSScreen.main
@@ -240,8 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         for w in webs where loaded.contains(ObjectIdentifier(w)) { body(w) }
     }
 
-    /// 用 DispatchSourceTimer 而不是 asyncAfter：后者的 leeway 跟间隔成正比，
-    /// 实测 60 秒的闸门会飘到 63 秒。闸门是给用户兜底的，不能由系统看着办。
+    /// DispatchSourceTimer 为退出闸门提供明确的容差。
     private func after(_ seconds: Double, _ body: @escaping () -> Void) {
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + seconds, leeway: .milliseconds(50))
@@ -258,11 +247,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         timers.append(t)
     }
 
-    /// --force 时没有真实的目标时刻，就拿「现在 + lead」当靶子，
-    /// 这样倒计时类主题预览时也有东西可倒。
+    /// 预览模式用 now + lead 构造目标时刻。
     private func resolveTarget(now: Date) -> Date {
-        // `--target` 是 Go 根据匹配到的 launchd 触发点还原出的绝对时刻。
-        // 优先使用它；`--at` 仍保留给旧版调用方和手工调试。
+        // 优先使用 Go 还原的绝对时刻；--at 仅用于兼容和手工调试。
         if let epoch = opts.targetEpoch {
             return Date(timeIntervalSince1970: epoch)
         }
@@ -280,23 +267,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         // 可见时长闸门，从这一刻开始算
         after(min(opts.timeout, maxVisibleSeconds)) { NSApp.terminate(nil) }
 
-        // 心跳：由壳来喂时间，主题不要自己起 setInterval/setTimeout 来卡点。
-        // 实测页面里的 JS 定时器在重绘压力下会被拖到几秒甚至不来，
-        // 而壳这边的 DispatchSourceTimer 误差只有几毫秒。时间归壳，像素归主题。
+        // 宿主心跳提供权威时间，主题负责帧间视觉插值。
         every(heartbeatInterval) { [weak self] in
             guard let self else { return }
-            // 派发 tick 之前先把 fire 补上，保证 onFire 一定早于第一条
-            // now >= target 的 onTick。没有这一刀，主题就没法自己用
-            // now >= target 判断到点，只能被迫走 onFire——等于壳把一种写法
-            // 强加给了所有主题。
-            //
-            // 别以为这只是个顺序补丁：applicationDidFinishLaunching 里那个
-            // 专用 fire timer 看着像「高精度」，实测反而是它慢。它跟心跳的
-            // evaluateJavaScript 抢主队列，leeway 又是 50ms（心跳 20ms），
-            // 实测比心跳晚 159-483ms，于是旧行为下 tick 几乎每次都跑在
-            // onFire 前面。加上这一刀之后 fire 延迟降到 13-99ms。
-            //
-            // 两个 timer 都留着，取先到的那个：谁快算谁的。
+            // 保证 target 之后的首个 tick 前已按 reveal -> fire 顺序派发。
             if !self.fired, Date() >= self.target { self.fire() }
             self.eachLoadedWeb { $0.evaluateJavaScript(
                 "window.__gongTick && window.__gongTick(\(self.nowMillis()))",
@@ -326,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
                                  backing: .buffered,
                                  defer: false)
 
-        // screenSaver 层 (1000) 才盖得住别的 App 的全屏窗口；普通 .floating (3) 会被压在下面
+        // screenSaver 层可以覆盖其他 App 的全屏窗口。
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.screenSaverWindow)))
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -349,8 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         let web = WKWebView(frame: screen.frame, configuration: cfg)
         web.navigationDelegate = self
 
-        // 让 WebView 背景真透明。前者是公开 API（macOS 12+），后者是历来管用的那个 KVC 写法，
-        // 两个都写是因为不同系统版本上表现不完全一致。
+        // 公开 API 与 KVC 兼顾不同系统版本的透明背景行为。
         web.underPageBackgroundColor = .clear
         web.setValue(false, forKey: "drawsBackground")
         if #available(macOS 13.3, *) { web.isInspectable = true }   // 主题作者用 Safari 调试
@@ -360,10 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         return (panel, web)
     }
 
-    /// 注入契约。壳只给【时间】和【几何】，提醒长什么样、说什么全归主题。
-    /// 刻意不注入标签/文案之类的内容参数——那会诱导主题去按某条定时分支，
-    /// 等于把表现逻辑漏回配置层。要不同的提醒形式就写不同的主题。
-    /// （--tag 只进 stderr，不进这里。）
+    /// 注入只包含时间和屏幕几何；表现内容完全由主题定义。
     private func bootstrapJS(screen: NSScreen, index: Int, total: Int,
                              isMain: Bool, primary: Bool,
                              target: Date, now: Date) -> String {
@@ -573,13 +543,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         return delta >= -(Double(opts.lead) + earlySlackSeconds) && delta <= Double(opts.grace)
     }
 
-    /// 启发式：全屏 App 会藏起菜单栏和 Dock，此时 visibleFrame 等于 frame。
-    /// 缺点是开了「自动隐藏菜单栏」会误判。要更准就换成 CGWindowListCopyWindowInfo
-    /// 遍历 layer 0 的窗口、看有没有 bounds 铺满整屏的——只读 bounds，绝对不要读窗口标题，
-    /// 读标题会触发屏幕录制权限申请。
+    /// 只检查前台应用的 layer 0 窗口边界，不读取窗口标题或请求录屏权限。
     private func fullscreenAppInFront() -> Bool {
-        NSScreen.screens.contains { screen in
-            screen.visibleFrame.height >= screen.frame.height
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              let windows = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+              ) as? [[String: Any]]
+        else { return false }
+
+        let displays = NSScreen.screens.compactMap { screen -> CGRect? in
+            let key = NSDeviceDescriptionKey("NSScreenNumber")
+            guard let number = screen.deviceDescription[key] as? NSNumber else { return nil }
+            return CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
+        }
+        let tolerance = 2.0
+        return windows.contains { window in
+            guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == frontmost.processIdentifier,
+                  (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let rawBounds = window[kCGWindowBounds as String] as? [String: NSNumber],
+                  let bounds = CGRect(dictionaryRepresentation: rawBounds as CFDictionary)
+            else { return false }
+
+            return displays.contains { display in
+                bounds.minX <= display.minX + tolerance &&
+                bounds.minY <= display.minY + tolerance &&
+                bounds.maxX >= display.maxX - tolerance &&
+                bounds.maxY >= display.maxY - tolerance
+            }
         }
     }
 }

@@ -35,61 +35,24 @@
   const g = window.gong;
   if (g.apiVersion !== 1) throw new Error('unsupported Theme API');
 
-  // ── 这个主题跟原设计稿的三处硬性出入，都是被浮层的运行环境逼的 ──────
-  //
-  // 1【时钟拆成两半】原稿是一个 rAF 循环，进度也从 rAF 的 dt 累加出来。
-  //   这里改成：绝对时刻归壳、帧率归 rAF。壳的 onTick 心跳是权威的绝对
-  //   时间但只有 10Hz，rAF 有刷新率但不知道「到点」是哪一刻；所以每次
-  //   心跳打一个锚点，两次心跳之间用 performance.now 从锚点往前推。画面
-  //   按刷新率走，绝对时刻每 100ms 被校正一次，不累计漂移。见下面 clockNow。
-  //   时序常数因此可以照抄原稿（morph 520ms、切片 0.28）。
-  //
-  // 2【没有指针笔刷】原稿有个跟随光标、平方衰减把圆点擦掉的笔刷。浮层
-  //   不接收鼠标事件（nonactivating + cursor:none），这块直接删掉而不是
-  //   留着不接线——留着也永远不会触发。
-  //
-  // 3【背景不填死】原稿把背景整片填成配色里的底色，字是挖穿后露出的底色。
-  //   gong 的前提是盖在桌面上而不是盖住桌面，所以底色带 alpha：挖掉的洞
-  //   里透出来的是压了色罩的真实桌面。负空间的读法反而更成立。
-  //
-  // 其余全部照原稿：42 列相切圆、0.75 pitch 内缩、整行数居中、圆盘钻孔成
-  // 环的连续中间态、反向缠绕内圆打进同一条 Path2D 走 evenodd 一次提交、
-  // 按格分辨率直接光栅化字形、两条独立图案轴（切割 + 纹理）、五种到达时序
-  // 配五种到达运动、双色配对交叉混合。
+  // 绝对时间来自宿主，rAF 只补中间帧；透明底色让负空间露出桌面。
 
-  // ── 配置：原组件的 props 在这里全部写死 ──────────────────────────
+  // ── 配置 ──────────────────────────────────────────────────────
   const BASE_COLS = 42;  // 「~42 circles across」，普通屏就是这个数
   const MIN_ROWS = 20;   // 行数下限，见 measure() 里那段
   const MARGIN = 0.75;   // 四边各留 0.75 个 pitch，网格不出血
-  const MORPH_MS = 520;  // 原稿值
-  const SLICE = 0.28;    // 每格在 morph 里实际运动的时间占比，原稿值
-  const STYLE_FLIP = .32;// 纹理轴换场的同名参数，原稿单列了一个值
-  const SCENE_MS = 1120; // 图案场景的完整节拍（原稿的 hold 600 + morph 520）
+  const MORPH_MS = 520;
+  const SLICE = 0.28;    // 每格在 morph 里实际运动的时间占比
+  const STYLE_FLIP = .32;
+  const SCENE_MS = 1120; // 图案场景的完整节拍
   const OUT_MS   = 2120; // 到点后 OUT 停多久（morph 520 + 静止 1600）
   const EXIT_MS  = 900;  // 塌陷（520）+ 等 CSS 那 .5s 淡出走完
   const SCRIM    = .9;   // 底色不透明度，见上面第 3 条
   const FONT = '-apple-system, "SF Pro Display", "Helvetica Neue", Inter, sans-serif';
 
-  // 原稿的 squareness（超椭圆插值）和 fill（半径缩放）在这里恒为 0 和 1：
-  // 圆点必须严格相切才有那些凹菱形，稍微拉开就散成波点，没有可调的余地。
-  // 既然没有调用方，这两个分支就不留了。
-
   // ── 场景表 ────────────────────────────────────────────────────
-  //
-  // 原稿是 6 个场景无限轮播：1 个字母 + 5 个满幅图案。gong 有生命周期，
-  // 正好能吃下原稿那句「一个居中图形被五次整面重组包围，才落得像一个事件
-  // 而不是又一张幻灯片」——lead 期间轮播图案，到点那一刻图形砸下来。
-  //
-  // 【为什么不刻时刻】原稿警告过「这个格子密度下只有粗壮、封闭、高对比的
-  // 形状能活下来，细笔画和标点会溶成噪声」。实测证实了：在真实 WKWebView
-  // 里按格分辨率光栅化 "18:30"，42 列下每个字符只摊到 7 格，冒号只剩两个
-  // 孤点，8/3/0 的内孔跟笔画粘连；加宽到 48、52、60 列依然糊，而 pitch 会
-  // 从 44px 掉到 31px，相切圆盘那个质感先没了。"OUT" 三个字母在 42 列下则
-  // 干净利落（占 12.3/22 行，O 的内孔完整）。所以这个主题只刻 OUT——反正
-  // 原稿本来也只给一个图形，两个图形连着上只会互相稀释。
-  //
-  // style 是第二条图案轴：它给切割后还立着的格子钻孔（实心盘 → 环），
-  // 于是同屏两种图案同时可读。配对刻意跟切割不同轴。
+  // 网格密度只适合粗壮轮廓，因此目标文字固定为 OUT。
+  // style 独立控制留存格从实心盘变为环。
   const PATTERNS = [
     { kind:'rings',   transition:'ripple',   palette:0, style:'grain'  },
     { kind:'columns', transition:'columns',  palette:2, style:'streak' },
@@ -97,8 +60,7 @@
     { kind:'boxes',   transition:'collapse', palette:4, style:'grain'  },
     { kind:'bars',    transition:'wipe',     palette:5, style:'drift'  },
   ];
-  // 唯一的图形。琥珀配红是全表里最像警报的一对，且 palette 1 只有它用，
-  // 无论 lead 停在哪个图案上，到点那一下的换色都是一次明确的跳变。
+  // 目标场景使用独占配色，确保到点时有明确跳变。
   const OUT_SCENE  = { kind:'text', value:'OUT', transition:'collapse', palette:1, style:'swell' };
   // 退场：目标全空，沿用 OUT 的配色不再换色，整片从边缘往里塌。
   const EXIT_SCENE = { kind:'empty', transition:'collapse', palette:1, style:null };
@@ -265,12 +227,7 @@
     glyphCtx.fillStyle = '#fff';
     glyphCtx.textAlign = 'center'; glyphCtx.textBaseline = 'middle';
 
-    // 目标：字形包围盒占网格高度的 58%，四周留一圈完整晶格——原稿那句
-    // 「像挖穿一个表面而不是一个边框」。
-    //
-    // 注意是按【实测包围盒】双向顶到 58%，不是拿字号当高度只做封顶：字号
-    // 里含 ascender/descender 的余量，OUT 这种全大写的实际字高只有字号的
-    // 七成，只封顶的话图形会缩到 41% 才停，看着像没敢铺开。
+    // 按字形实际包围盒占满 58% 网格高度，并保留完整的外围晶格。
     const maxW = cols * .84, maxH = rows * .58;
     let size = maxH;
     const fit = () => { glyphCtx.font = '700 ' + size + 'px ' + FONT; };
@@ -395,7 +352,7 @@
     const circle = mixHex(ca, cb, m);
     const back = mixHex(ba, bb, m);
 
-    // 底色带 alpha：挖掉的洞里透出来的是压了色罩的桌面（见开头第 3 条）
+    // 半透明底色让挖空区域露出压色后的桌面。
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = 'rgba(' + back[0] + ',' + back[1] + ',' + back[2] + ',' + SCRIM + ')';
     ctx.fillRect(0, 0, W, H);
@@ -444,8 +401,7 @@
   //（lead=0 或者页面加载晚了，第一帧直接就是 OUT，不会先补放一遍图案）。
   function sceneAt(now) {
     const dt = now - g.target;
-    // 降级模式就是原稿说的「一帧静止画面」：不轮播图案、不做逐格形变，
-    // 从亮相到退场一直是挖好的 OUT，退场也只剩 CSS 那一下淡出。
+    // 减少动态效果时保持静态 OUT，仅执行 CSS 淡出。
     if (reduced) {
       return dt < OUT_MS ? { key: 'out', scene: OUT_SCENE }
                          : { key: 'exit', scene: EXIT_SCENE };
@@ -464,10 +420,7 @@
   applyScene(curScene, false);
   draw(0);
 
-  // 只在尺寸真的变了才重建。ResizeObserver 在 observe() 时会先无条件回调
-  // 一次，那一次必须挡掉：measure() 里的 applyScene(_, true) 会把 from 和
-  // live 一起钉成终态，插值就没有起点了——第一场的入场形变会整个被吃掉，
-  // 亮相时网格直接硬切到位（实测过，不是理论担心）。
+  // 忽略 ResizeObserver 的首次同尺寸回调，避免覆盖入场插值起点。
   if (typeof ResizeObserver !== 'undefined') {
     let seenW = window.innerWidth, seenH = window.innerHeight;
     new ResizeObserver(() => {
@@ -480,13 +433,7 @@
 
   // ── 时钟：绝对时刻归壳，帧率归 rAF ────────────────────────────
   //
-  // 壳的心跳是唯一权威的绝对时间，但它只有 10Hz，拿它当画面时钟整场都在抖。
-  // rAF 在浮层里是活的（实测满负载 75fps），所以两者分工：
-  //   · 每次 onTick 打一个锚点（壳的绝对毫秒 ↔ 当时的 performance.now）
-  //   · 两次心跳之间由 performance.now 从锚点往前推
-  // 于是画面按刷新率走，而绝对时刻每 100ms 被壳校正一次，不会累计漂移。
-  //
-  // clockNow 单调不回退：系统校时可能让 epoch 暂时倒退，让画面倒放就太蠢了。
+  // 心跳校准绝对时间，performance.now 补帧；clockNow 保持单调。
   let anchorGong = 0, anchorPerf = 0, lastClock = 0;
   function clockNow() {
     const t = anchorGong + (performance.now() - anchorPerf);
@@ -526,9 +473,7 @@
     // 重新对锚。心跳的绝对值永远压过本地推算出来的那个。
     if (now > anchorGong) { anchorGong = now; anchorPerf = performance.now(); }
 
-    // 心跳这一路照样完整推进一次：rAF 万一在某些机器/系统版本上被节流掉，
-    // 主题会退化成 10fps 而不是卡死。同理，退场闸门只认心跳——doc.md 那条
-    // 「不要拿 rAF 当业务时钟或退出闸门」仍然成立，rAF 在这里只补中间帧。
+    // 心跳也完整推进状态，保证 rAF 被节流时仍能渲染和退出。
     const t = clockNow();
     update(t);
 

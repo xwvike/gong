@@ -1,8 +1,4 @@
-// Package theme 解析主题目录。
-//
-// 主题就是一个目录：<name>/index.html + <name>/theme.toml。
-// 用户目录优先、回落到内置——这样 brew upgrade 能更新内置主题，
-// 而用户自己写的永远不会被覆盖。
+// Package theme 解析用户优先的主题目录。
 package theme
 
 import (
@@ -17,11 +13,8 @@ import (
 )
 
 type Meta struct {
-	Desc      string `toml:"desc"`
-	Lead      int    `toml:"lead"`      // 提前多少秒亮相
-	Duration  int    `toml:"duration"`  // 从实际亮相到视觉预计结束的秒数
-	Placement string `toml:"placement"` // center / edge / corner
-	WebGL     bool   `toml:"webgl"`     // 声明性元数据；当前不改变 Go/外壳行为
+	Lead     int `toml:"lead"`
+	Duration int `toml:"duration"`
 }
 
 type Theme struct {
@@ -32,7 +25,7 @@ type Theme struct {
 	Meta    Meta
 }
 
-// 壳那边写死的上限，这里跟着 clamp，免得生成出一条壳会拒绝的命令行
+// 与渲染壳的硬上限保持一致。
 const (
 	MaxLead       = 60
 	MaxVisible    = 60
@@ -106,7 +99,6 @@ func Resolve(id string) (Theme, error) {
 // List 列出所有可用主题，同名时用户的盖住内置的。
 func List() []Theme {
 	byID := map[string]Theme{}
-	order := []string{}
 	add := func(root string, builtin bool) {
 		if root == "" {
 			return
@@ -119,12 +111,12 @@ func List() []Theme {
 			if !e.IsDir() {
 				continue
 			}
+			if !builtin {
+				delete(byID, e.Name())
+			}
 			t, err := load(filepath.Join(root, e.Name()), builtin)
 			if err != nil {
 				continue
-			}
-			if _, dup := byID[t.ID]; !dup {
-				order = append(order, t.ID)
 			}
 			byID[t.ID] = t
 		}
@@ -133,9 +125,13 @@ func List() []Theme {
 	add(paths.Builtin(), true)
 	add(paths.UserThemes(), false)
 
-	sort.Strings(order)
-	out := make([]Theme, 0, len(order))
-	for _, id := range order {
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Theme, 0, len(ids))
+	for _, id := range ids {
 		out = append(out, byID[id])
 	}
 	return out

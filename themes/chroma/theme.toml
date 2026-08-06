@@ -1,6 +1,2 @@
-# 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
-desc      = "暗墙上一个发光的词，warm/cool 两份副本朝反方向拉开，缝里是棱镜彩虹边；到点前化成一团彩雾，到点那一刻换成 CLOCK OUT 重新凝出。"
 lead      = 4        # 时刻先亮 3.55s，最后 0.45s 雾散开，峰值正好压在到点那一刻
 duration  = 8        # 4s 时刻 + 0.6s 凝聚 + 2.2s 停留 + 0.9s 淡出，留点余量
-placement = "center" # 词在屏幕正中，整屏铺满，会挡视线
-webgl     = true     # 4 级降采样高斯 bloom + 色散裂边合成，WebGL1

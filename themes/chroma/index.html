@@ -8,8 +8,7 @@
   html, body { margin:0; height:100%; background:transparent; overflow:hidden;
                -webkit-user-select:none; cursor:none; }
 
-  /* 进场/退场只走 opacity，由合成器跑。
-     .92 而不是 1：暗墙压在桌面上，留一点透，见脚本开头第 3 条。 */
+  /* 半透明暗墙保留桌面轮廓，透明度动画交给合成器。 */
   #stage {
     position: fixed; inset: 0;
     opacity: 0;
@@ -35,43 +34,11 @@
   const g = window.gong;
   if (g.apiVersion !== 1) throw new Error('unsupported Theme API');
 
-  // ── 跟原设计稿的出入 ────────────────────────────────────────────
-  //
-  // 1【只留暗色世界】原稿六套预设里两套是 invert 的亮墙压字。仓库里 bloom
-  //   已经是浅纸那一路了，这个主题留暗墙才有自己的身份；而且 invert 分支在
-  //   合成着色器里是一整段独立的亮墙合成逻辑，不用就不该留着占逐像素预算。
-  //   所以四套暗色预设照抄，invert 那一整支连同 uInvert 一起删掉。
-  //
-  // 2【没有指针】原稿有跟随光标的辉光池、同心涟漪、以及让裂边朝光标偏的那
-  //   一项。浮层不接收鼠标事件（nonactivating + cursor:none），这三块连同
-  //   uCursor/uCursorOn 一起删掉——留着恒为 0 也是在逐像素白算。
-  //   裂边改由原稿那套自主漫游（分层正弦）单独驱动，本来它就是静息状态的动力。
-  //
-  // 3【墙不全不透明】gong 的前提是盖在桌面上而不是盖住桌面。WebGL 这边照旧
-  //   alpha:false（色调映射和墙面纹理都需要确定的底），透放在 CSS 给 #stage
-  //   一个 .92。
-  //
-  // 4【换词做成两张遮罩交叉淡入，而不是峰值硬换】原稿在 disperse 峰值直接
-  //   重建遮罩，理由是「那一刻是一团无形的雾，换了看不见」。但核心亮度只降到
-  //   25%（原稿刻意不让它归零，好让字始终可读），硬换会露出一道虚影；而且重建
-  //   遮罩要在动画中途跑一次 CPU 光栅化加纹理上传，正好卡在最忙的那一帧。
-  //   这里改成两张遮罩预先建好，峰值附近用 uSwap 交叉淡过去。
-  //
-  // 5【尺寸锁按最长的词算】原稿每个词各自按高度定字号、超宽才缩，于是长词会
-  //   比短词小一圈。时刻和 CLOCK OUT 长短差一倍，所以先按最长的词算出唯一
-  //   字号、两个词共用。
-  //
-  // 6【时钟】画面走 rAF，绝对时刻走壳的心跳锚点，退场闸门只认心跳。
-  //
-  // 其余照原稿：白色剪影当辉光源、4 级降采样的可分离 H/V 9-tap 高斯 bloom 按
-  // 权重求和（紧的那几级占大头，最宽的只是一层薄裙边）、warm/cool/fringe 三路
-  // 按不同方向偏移采样出色散裂边、随离心距离张开的 5 taps 真棱镜色散、
-  // 1-exp(-x) 软色调映射、液态金属般的极小 uv 抖动、墙面 fbm 斑驳加掠光、
-  // 双层低频噪声打出来的活体焦散、暗角、颗粒。
+  // 两张预生成遮罩负责换词；绝对时间来自宿主，rAF 只补中间帧。
 
   // ── 配置 ──────────────────────────────────────────────────────
-  const DPR_CAP  = 2;     // 原稿值，实测撑得住，见 measure()
-  const LOCK     = .42;   // 字号 = 画布高度的 42%，原稿值
+  const DPR_CAP  = 2;
+  const LOCK     = .42;   // 字号 = 画布高度的 42%
   const MAX_W    = .78;   // 词最宽占 78%，给 bloom 和裂边留出扩散余地
   const LEVELS   = [[.5, 1.5], [.25, 2.0], [.125, 2.5], [.0625, 3.0]]; // [降采样, 半径]
 
@@ -93,7 +60,7 @@
     'CLOCK OUT',
   ];
 
-  // ── 四套暗色世界（原稿预设，去掉两套 invert 的）────────────────
+  // ── 四套暗色世界 ─────────────────────────────────────────────
   const WORLDS = [
     { // 蜜桃 / 钢蓝，玫瑰裂边，深暮蓝墙
       warm:[1,.66,.5], cool:[.42,.6,.95], red:[1,.42,.6],
@@ -137,7 +104,7 @@
     for (const c of chars) w += mx.measureText(c).width;
     return w + ls * (chars.length - 1);
   }
-  // 见开头第 5 条：唯一的字号由最长的词决定，两个词共用。
+  // 唯一字号由最长的词决定。
   function lockedSize(W, H) {
     let size = H * LOCK;
     mx.font = '800 ' + size + 'px ' + FONT;
@@ -170,7 +137,7 @@
 attribute vec2 aPos; varying vec2 vUv;
 void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }`;
 
-  // 可分离 9-tap 高斯。uSwap>0 时第 0 级在两张遮罩之间交叉淡（见开头第 4 条）。
+  // 可分离 9-tap 高斯；uSwap 在第 0 级交叉混合两张遮罩。
   const BLUR_FRAG = `
 precision highp float;
 varying vec2 vUv;
@@ -313,7 +280,7 @@ void main(){
 
   if (!gl) {
     console.warn('chroma: 拿不到 WebGL 上下文，主题跳过');
-    // 等到约定的那一刻再收工。画布上什么都没有，看着就是没发生过。
+    // 保持透明，到达目标时刻后退出。
     g.onTick = now => { if (now >= g.target) { g.onTick = null; g.done(); } };
     return;
   }
@@ -386,10 +353,6 @@ void main(){
   let levels = [], maskA = null, maskB = null, cw = 0, ch = 0;
 
   function measure() {
-    // 原稿在 620px 高的卡片里封到 dpr 2；这里是整屏，合成 pass 每像素要跑三次
-    // bloomAt 加一次 5 taps 的棱镜（合计三十多次纹理取样），dpr 2 的 Retina 全屏
-    // 是 4 倍像素量，本来担心扛不住。实测 3840x2160 跑出 85.1fps，跟 1920x1080
-    // 的 85.3 一个数——是被垂直同步顶住的，离 GPU 上限还远。所以照原稿封到 2。
     const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
     const w = Math.max(1, Math.round(window.innerWidth * dpr));
     const h = Math.max(1, Math.round(window.innerHeight * dpr));
@@ -406,8 +369,7 @@ void main(){
       return { out: makeTarget(lw, lh), tmp: makeTarget(lw, lh) };
     });
 
-    // 两张遮罩预先建好（见开头第 4 条）。makeMask 画完共用的那块 2D 画布，
-    // uploadMask 紧跟着传上去——顺序不能调换。
+    // 共享的 2D 画布必须在每次 makeMask 后立即上传。
     const size = lockedSize(w, h);
     makeMask(WORDS[0], w, h, size); maskA = uploadMask(maskA);
     makeMask(WORDS[1], w, h, size); maskB = uploadMask(maskB);
@@ -465,13 +427,11 @@ void main(){
       gl.uniform1i(cu['uB' + i], 2 + i);
     }
 
-    // 裂边由自主漫游驱动：几条不同频率的正弦叠出一条平滑、既不绕圈也不走
-    // 直线的路径。原稿还在这上面套了一层指数跟随，但正弦和本来就是连续的，
-    // 那层跟随只是额外平滑，而且跟帧率挂钩——这里直接用绝对时间算，去掉。
+    // 不同频率的正弦按绝对时间合成平滑且与帧率无关的漫游路径。
     const T = t * 3.2;
     const fx = .16*Math.sin(T*1.15) + .09*Math.sin(T*2.6+1) + .05*Math.cos(T*4.1+.4);
     const fy = .13*Math.cos(T*.95+2.1) + .07*Math.sin(T*2.2+.5) + .04*Math.cos(T*3.7+1.7);
-    const splitUv = p.split / 620; // 原稿以 620px 高为基准；用 uv 单位就与屏幕大小无关
+    const splitUv = p.split / 620; // 转为与屏幕大小无关的 uv 单位
     gl.uniform2f(cu.uSplit, fx * 2.4 * splitUv, fy * 2.4 * splitUv);
 
     gl.uniform1f(cu.uDisperse, disperse);

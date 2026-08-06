@@ -1,6 +1,2 @@
-# 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
-desc      = "一整屏相切的圆点网格反复整面重组，到点时 OUT 作为一个洞从网格里挖穿，随后整片从边缘往里塌陷。"
 lead      = 6        # 5 个图案场景各 1.12s，正好轮完一圈，OUT 才砸得下去
 duration  = 10       # 6s 图案 + 2.12s OUT + 0.9s 塌陷，留点余量
-placement = "center" # 网格铺满整屏，会挡视线
-webgl     = false    # 单条 Path2D + evenodd 填充，2D canvas 就够

@@ -1,17 +1,9 @@
-// Package agent 负责 launchd 那一半：生成 plist、接管、卸载。
-//
-// 为什么不是 brew 帮我们装 plist：formula 的 install 跑在沙箱里只准写 Cellar 前缀，
-// 而 brew services 一个 formula 只能有一个 service、cron 只接受一个表达式，
-// 表达不了「12:00 + 18:00 + 用户任意增删」。所以这活儿必须自己干。
-//
-// 所有定时共用【一个】 plist。`StartCalendarInterval` 本来就是个数组，
-// 装多少个「星期几 + 几点几分」都行，没必要一条定时一个 job。
+// Package agent 管理包含全部定时的单个 launchd plist。
 package agent
 
 import (
 	"encoding/xml"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,11 +16,7 @@ import (
 	"github.com/xwvike/gong/internal/theme"
 )
 
-// Trigger 是 launchd 实际被叫醒的时刻。
-//
-// StartCalendarInterval 只有 Hour/Minute，【没有 Second】。所以 lead=5 的定时
-// 不可能让 launchd 在 11:59:55 触发，只能落到 11:59:00，剩下的 55 秒由壳自己等
-// （壳会先把页面加载好但不亮相）。
+// Trigger 是 launchd 可表达的分钟级触发时刻。
 type Trigger struct {
 	Hour, Minute int
 	Weekdays     []int
@@ -61,21 +49,26 @@ func triggerTimeOfDay(atSeconds, lead int) (seconds, dayShift int) {
 	return seconds, dayShift
 }
 
-// Occurrences 给出这个触发点在 now 前后一天内的所有绝对时刻，用来反查是哪条定时。
-func (t Trigger) Occurrences(now time.Time) []time.Time {
-	var out []time.Time
-	for _, off := range []int{-1, 0, 1} {
+// latestOccurrence 返回不晚于 now 的最近触发点。launchd 不会提前启动任务，
+// 因此不能用绝对距离匹配未来的定时。
+func (t Trigger) latestOccurrence(now time.Time) (time.Time, bool) {
+	var best time.Time
+	for off := 0; off >= -7; off-- {
 		d := now.AddDate(0, 0, off)
-		wd := int(d.Weekday()) // Go 的 Sunday=0..Saturday=6，跟 launchd 口径一致
+		wd := int(d.Weekday())
 		for _, w := range t.Weekdays {
-			if w == wd {
-				out = append(out, time.Date(d.Year(), d.Month(), d.Day(),
-					t.Hour, t.Minute, 0, 0, d.Location()))
-				break
+			if w != wd {
+				continue
 			}
+			candidate := time.Date(d.Year(), d.Month(), d.Day(),
+				t.Hour, t.Minute, 0, 0, d.Location())
+			if !candidate.After(now) && (best.IsZero() || candidate.After(best)) {
+				best = candidate
+			}
+			break
 		}
 	}
-	return out
+	return best, !best.IsZero()
 }
 
 // TriggerFor 算一条定时的触发点，主题找不到时按 lead=0 处理。
@@ -83,11 +76,7 @@ func TriggerFor(s config.Schedule) Trigger {
 	return ComputeTrigger(s.Seconds(), scheduleLead(s), s.Weekdays)
 }
 
-// scheduleLead 返回生成 launchd 触发点时使用的提前秒数。
-//
-// 主题不存在时跟 TriggerFor 一样按 lead=0 处理；真正执行时 cmdFire
-// 还会再次解析主题并报错。保持这里的回退行为可以让反查在配置暂时损坏时
-// 仍然是确定的，不会因为反查本身 panic。
+// scheduleLead 在主题不可用时返回 0，保证只读展示和反查仍可执行。
 func scheduleLead(s config.Schedule) int {
 	if th, err := theme.Resolve(s.Theme); err == nil {
 		return th.LeadSeconds()
@@ -95,12 +84,7 @@ func scheduleLead(s config.Schedule) int {
 	return 0
 }
 
-// targetForTrigger 把 launchd 的触发点还原成定时真正的目标时刻。
-//
-// StartCalendarInterval 只能精确到分钟，而提前亮相还可能把触发点推到
-// 前一天。仅把 at 的时分秒套到「今天」会在这种情况下得到错误日期（例如
-// 周一 00:00:02、lead=5 会在周日 23:59 被拉起）。这里复用 ComputeTrigger
-// 的日偏移规则，从触发点的日期还原目标日期，再写入原始秒数。
+// targetForTrigger 按相同的跨日偏移规则还原绝对目标时刻。
 func targetForTrigger(s config.Schedule, trigger time.Time) time.Time {
 	at := s.Seconds()
 	_, dayShift := triggerTimeOfDay(at, scheduleLead(s))
@@ -109,25 +93,7 @@ func targetForTrigger(s config.Schedule, trigger time.Time) time.Time {
 		at/3600, (at/60)%60, at%60, 0, day.Location())
 }
 
-// nearestTrigger 找出一个定时离 now 最近的 launchd 触发点。
-func nearestTrigger(t Trigger, now time.Time) (time.Time, bool) {
-	var best time.Time
-	bestDelta := time.Duration(math.MaxInt64)
-	for _, cand := range t.Occurrences(now) {
-		d := now.Sub(cand)
-		if d < 0 {
-			d = -d
-		}
-		if d < bestDelta {
-			best, bestDelta = cand, d
-		}
-	}
-	return best, !best.IsZero()
-}
-
-// MatchResult 是合并 plist 后的一次反查结果。launchd 不会告诉我们是哪条
-// 定时触发，所以除了 schedule 还要保留它对应的绝对目标时刻，交给 Swift
-// 壳使用；否则跨午夜时壳会把目标错误解析到触发日。
+// MatchResult 保存共享 job 反查出的定时和绝对目标时刻。
 type MatchResult struct {
 	Schedule *config.Schedule
 	Index    int // 在 c.Schedules 里的位置，打日志标签时当「#N」用，不依赖名字
@@ -136,22 +102,18 @@ type MatchResult struct {
 
 // MatchTarget 反查「现在这一下是哪条定时」以及它的绝对目标时刻。
 func MatchTarget(c *config.Config, now time.Time) *MatchResult {
-	best, bestDelta := -1, time.Duration(math.MaxInt64)
+	best := -1
 	var bestTrigger time.Time
 	for i := range c.Schedules {
 		if !c.Schedules[i].Enabled {
 			continue
 		}
-		trigger, ok := nearestTrigger(TriggerFor(c.Schedules[i]), now)
+		trigger, ok := TriggerFor(c.Schedules[i]).latestOccurrence(now)
 		if !ok {
 			continue
 		}
-		d := now.Sub(trigger)
-		if d < 0 {
-			d = -d
-		}
-		if d < bestDelta {
-			best, bestDelta, bestTrigger = i, d, trigger
+		if best < 0 || trigger.After(bestTrigger) {
+			best, bestTrigger = i, trigger
 		}
 	}
 	if best < 0 {
@@ -164,31 +126,52 @@ func MatchTarget(c *config.Config, now time.Time) *MatchResult {
 	}
 }
 
-// TargetFor 返回一条定时离 now 最近的目标时刻，供 cmdFire 补出绝对日期。
-func TargetFor(s config.Schedule, now time.Time) time.Time {
-	trigger, ok := nearestTrigger(TriggerFor(s), now)
-	if !ok {
-		return time.Time{}
+type triggerSlot struct{ weekday, hour, minute int }
+
+// ValidateTriggerSlots 拒绝会落入同一个 launchd 分钟槽的启用定时。
+func ValidateTriggerSlots(c *config.Config) error {
+	if err := c.Validate(); err != nil {
+		return err
 	}
-	return targetForTrigger(s, trigger)
+	return validateTriggerSlots(c)
 }
 
-// Match 反查「现在这一下是哪条定时」。
-//
-// 合并成一个 plist 之后 launchd 不再告诉我们是谁触发的，只能按时间反推：
-// 取触发点离 now 最近的那条。猜错也不至于出事——壳自己还有时间窗判断会把
-// 不该放的挡掉（比如睡醒后 launchd 补跑）。
-func Match(c *config.Config, now time.Time) *config.Schedule {
-	if result := MatchTarget(c, now); result != nil {
-		return result.Schedule
+func validateTriggerSlots(c *config.Config) error {
+	owners := make(map[triggerSlot]int)
+	for i, s := range c.Schedules {
+		if !s.Enabled {
+			continue
+		}
+		tr := TriggerFor(s)
+		for _, weekday := range tr.Weekdays {
+			slot := triggerSlot{weekday, tr.Hour, tr.Minute}
+			if previous, exists := owners[slot]; exists {
+				return fmt.Errorf("定时 %s 与 %s 的 launchd 触发时间冲突（星期 %d %02d:%02d）",
+					c.Schedules[previous].Ref(previous), s.Ref(i), weekday, tr.Hour, tr.Minute)
+			}
+			owners[slot] = i
+		}
 	}
 	return nil
 }
 
-// Plist 生成那唯一一个 launchd 配置，把所有启用定时的触发点并进去。
-//
-// ProgramArguments 走 `gong fire` 而不是直接调 gong-overlay：
-// 收摊动作（暂停音乐、切专注模式）将来要在这一步跑，而且这样改主题不必重写 plist。
+// ValidateScheduleSet 在写 plist 前完成资源和触发槽校验。
+func ValidateScheduleSet(c *config.Config) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	for i, s := range c.Schedules {
+		if !s.Enabled {
+			continue
+		}
+		if _, err := theme.Resolve(s.Theme); err != nil {
+			return fmt.Errorf("定时 %s：%w", s.Ref(i), err)
+		}
+	}
+	return validateTriggerSlots(c)
+}
+
+// Plist 把所有启用定时合并成一个 launchd 配置。
 func Plist(gongPath string, schedules []config.Schedule) []byte {
 	// 去重：两条定时撞在同一分钟时只留一个触发点，
 	// 否则 launchd 会叫醒两次，屏幕上叠两个浮层。
@@ -288,28 +271,15 @@ func Bootstrap() error {
 	return nil
 }
 
-// Loaded 报告 launchd 现在是不是真的接管着。
-// 单独查一遍是因为「配置里 enabled」和「系统里真的装了」是两回事——
-// 用户还可能在系统设置的「登录项与扩展」里把它关掉。
+// Loaded 报告 launchd 是否已加载当前 job。
 func Loaded() bool {
 	_, err := run("print", domain()+"/"+paths.Label)
 	return err == nil
 }
 
-// Kickstart 立刻触发一次，调试用。
-func Kickstart() error {
-	out, err := run("kickstart", "-k", domain()+"/"+paths.Label)
-	if err != nil {
-		return fmt.Errorf("launchctl kickstart: %s", out)
-	}
-	return nil
-}
-
 // ---- 同步 ----
 
-// ActiveSchedule 是一条被装进 plist 的定时，连它在 c.Schedules 里的
-// 真实位置一起带出来——Active 只收启用且主题有效的子集，下标从 0 重新数，
-// 跟原始位置对不上，所以不能只传 config.Schedule，Ref(i) 会算错。
+// ActiveSchedule 保留定时在原配置中的序号，供安装摘要使用。
 type ActiveSchedule struct {
 	Index    int
 	Schedule config.Schedule
@@ -325,7 +295,7 @@ type SyncResult struct {
 // Sync 把磁盘上的 plist 对齐到配置。幂等，可以随便重复跑。
 func Sync(c *config.Config, gongPath string) SyncResult {
 	var res SyncResult
-	if err := c.Validate(); err != nil {
+	if err := ValidateScheduleSet(c); err != nil {
 		res.Errors = append(res.Errors, err)
 		return res
 	}
@@ -351,10 +321,6 @@ func Sync(c *config.Config, gongPath string) SyncResult {
 	var valid []config.Schedule
 	for i, s := range c.Schedules {
 		if !s.Enabled {
-			continue
-		}
-		if _, err := theme.Resolve(s.Theme); err != nil {
-			res.Errors = append(res.Errors, fmt.Errorf("定时 %s：%w", s.Ref(i), err))
 			continue
 		}
 		res.Active = append(res.Active, ActiveSchedule{Index: i, Schedule: s})

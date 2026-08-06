@@ -36,7 +36,7 @@ gong off            # 关掉 gong，但保留配置和程序
 
 <img src="docs/noise.gif" alt="noise" width="720">
 
-## 卸载gong
+## 卸载
 
 ```bash
 gong uninstall
@@ -44,5 +44,5 @@ gong uninstall
 
 参数 `--purge` 会同时清除自定义主题目录 `~/.config/gong`。
 
-**避免直接 `brew uninstall gong`** ——  会导致plist 会留在
+**不要直接运行 `brew uninstall gong`**，否则 plist 会残留在
 `~/Library/LaunchAgents`。

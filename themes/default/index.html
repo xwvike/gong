@@ -8,13 +8,7 @@
   html, body { margin:0; height:100%; background:transparent; overflow:hidden;
                -webkit-user-select:none; cursor:none; }
 
-  /* 一条 LED 信号带贴在屏幕顶部，不挡视线中央，个头也不用那么大——
-     这不是要人盯着看的主视觉，扫一眼知道时间和状态就够了。
-     band 本身只管出现/收起的过渡，画面全交给里面的 canvas。
-
-     top 要躲开菜单栏：浮层是整屏的，vh 从屏幕最顶上算起，而菜单栏就占掉
-     约 3vh，原来的 4vh 等于紧贴着它。菜单栏高度是固定 pt、不随屏幕缩放，
-     所以再兜一个像素下限——纯 vh 在矮屏上照样会贴上去。 */
+  /* 信号带避开菜单栏，像素下限兼顾矮屏。 */
   .band {
     position: fixed; left: 0; right: 0; top: max(9vh, 76px); height: 9vh;
     transform: scaleY(.4); opacity: 0;
@@ -40,19 +34,13 @@
 
   const g = window.gong;
 
-  // ── 这些是「props」，原来的 React 组件靠调用方传，静态主题没有调用方，
-  //    只能写死在这——想换文案/配色/速度，改这一段就行。 ──────────────
+  // ── 配置 ────────────────────────────────────────────────────
   const CONFIG = {
     separator: '●',
-    // 原组件的 speed 是「每秒滚多少列」，配的是它自己 demo 里那个小预览框。
-    // gong 是全屏浮层，同样的列速度换算成像素/秒会因为屏幕大小、cell 尺寸
-    // 而完全不一样——按「每秒滚多少像素」算才是跟屏幕无关的量，这里选了一个
-    // 阅读节奏舒服的速度，觉得还是快/慢就直接改这个数。
+    // 像素速度在不同点阵密度下保持一致的阅读节奏。
     speedPxPerSec: 130,
     direction: 'left',     // left | right
-    // 原组件的 dotSize 是像素绝对值（默认 18），跟它默认 cell ≈ 120/7 ≈ 17px
-    // 几乎相等——点的直径本来就该顶满格子边长甚至略微重叠，才是真实 LED
-    // 点阵那种连成一片的效果，不是留出大把间隙的圆点阵列。
+    // 点直径略大于格子，使相邻 LED 连成信号带。
     dotSize: 1.1,
     dotShape: 'round',     // round | square
     dotQuantity: 10,       // 1..20，决定点阵有多少「行分辨率」
@@ -61,13 +49,9 @@
     offColor: null, // 没点亮的珠子就是纯透明——加一点暗红描边纯属多余的装饰
     glowStrength: .6,
     glowSize: 10,
-    // 原组件带的「不稳定信号板」噪声闪烁——每秒亮暗抖好几次，看着像刷新故障，
-    // 关掉。glow 留着，只是不要这个周期性的忽暗忽亮。
     flickerStrength: 0,
     flickerSpeed: 5,
-    // 内容是活的时钟，不是一句固定短语，不需要等它滚完一整轮才算「看到了」——
-    // 真实信号板本来就是长期跑着，路过瞄一眼是常态。这个时长只是给「提醒出现过」
-    // 留够反应时间。
+    // 活时钟无需等待完整滚动周期。
     visibleMs: 6400,
     fadeMs: 500,
   };
@@ -80,7 +64,7 @@
   const WORD_GAP_EXTRA = 3;
   const SEPARATOR_PAD_EXTRA = 5;
 
-  // 5x7 点阵字体，逐列位图。只porting原组件覆盖的可见 ASCII 范围。
+  // 5x7 点阵字体，逐列覆盖可见 ASCII。
   const FONT = [
     [0x00,0x00,0x00,0x00,0x00], [0x00,0x00,0x5f,0x00,0x00], [0x00,0x07,0x00,0x07,0x00],
     [0x14,0x7f,0x14,0x7f,0x14], [0x24,0x2a,0x7f,0x2a,0x12], [0x23,0x13,0x08,0x64,0x62],
@@ -177,7 +161,7 @@
     return pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
-  // ── 到这里为止是纯算法，跟原组件逐行对应。下面开始接 gong 的生命周期。──
+  // ── 生命周期 ──────────────────────────────────────────────
 
   const band = document.getElementById('band');
   const canvas = document.getElementById('led');
@@ -203,8 +187,7 @@
     canvas.height = Math.max(1, Math.round(h * dpr));
     boardRows = rowsForQuantity(CONFIG.dotQuantity);
     scale = boardRows / ROWS;
-    // textSize 不写死像素——原组件是给固定预览框用的，这里是全屏浮层，
-    // 屏幕分辨率、band 高度都不固定，按 canvas 实际高度算更稳。
+    // 点阵尺寸随画布高度缩放。
     const textSize = canvas.height * 0.86;
     cell = Math.max(1, textSize / boardRows);
     radius = (cell * CONFIG.dotSize) / 2;
@@ -280,9 +263,7 @@
     ctx.globalAlpha = 1;
   }
 
-  // rAF 只管画面推进得顺不顺滑——用它自己的时间戳算这一帧滚了多少列，
-  // 纯粹是视觉插值。是否该收尾、是否该喊 done()，一律不问 rAF，问 gong.now
-  // （见下面 g.onTick）：业务时钟和画面时钟是两条不相交的线。
+  // rAF 只推进滚动插值，生命周期由宿主心跳决定。
   function frame(time) {
     if (!running) return;
     const dt = lastFrameTime ? Math.min((time - lastFrameTime) / 1000, .05) : 0;

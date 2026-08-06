@@ -1,6 +1,2 @@
-# 主题清单。Go 侧读它算 plist 触发点和 --timeout，Swift 壳不读任何文件。
-desc      = "浅色纸面上一个清晰的词浮在渐变映射的辉光里；到点时时刻按字母序溶解成 CLOCK OUT，颜色也换一套。"
 lead      = 4        # 时刻先亮 4s，辉光呼吸、色相慢移，到点才溶解
 duration  = 9        # 4s 时刻 + 0.8s 溶解 + 2.4s 停留 + 1s 淡出，留点余量
-placement = "center" # 词在屏幕正中，整屏铺满，会挡视线
-webgl     = true     # 4 级降采样高斯 bloom + 渐变映射合成，WebGL1

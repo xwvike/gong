@@ -81,7 +81,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{name: "valid", mutate: func(*Config) {}},
 		{name: "nil config", mutate: nil, wantError: "配置不能为空"},
-		// 标签现在纯装饰：留空、带空格、跟别的定时重复都合法，不该拦。
+		{name: "unsupported version", mutate: func(c *Config) { c.Version = 2 }, wantError: "不支持配置版本"},
 		{name: "empty label is fine", mutate: func(c *Config) { c.Schedules[0].Label = "" }},
 		{name: "label with spaces is fine", mutate: func(c *Config) { c.Schedules[0].Label = "my lunch" }},
 		{name: "duplicate label is fine", mutate: func(c *Config) {
@@ -106,7 +106,7 @@ func TestValidate(t *testing.T) {
 				return
 			}
 
-			c := &Config{Version: 1, Schedules: []Schedule{validSchedule()}}
+			c := &Config{Version: CurrentVersion, Schedules: []Schedule{validSchedule()}}
 			tc.mutate(c)
 			err := c.Validate()
 			if tc.wantError == "" {
@@ -122,10 +122,9 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-// 出错信息里指代第几条定时：有标签用标签，没有就落回 "#序号"——
-// 不能假设每条定时都有标签（现在压根不要求）。
+// 错误信息有标签时用标签，否则用序号。
 func TestValidateErrorUsesDisplayName(t *testing.T) {
-	c := &Config{Version: 1, Schedules: []Schedule{
+	c := &Config{Version: CurrentVersion, Schedules: []Schedule{
 		{Label: "午间", At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: -1},
 	}}
 	err := c.Validate()
@@ -142,7 +141,7 @@ func TestValidateErrorUsesDisplayName(t *testing.T) {
 
 func TestSaveAndLoadRoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	want := &Config{Version: 1, Schedules: []Schedule{validSchedule()}}
+	want := &Config{Version: CurrentVersion, Schedules: []Schedule{validSchedule()}}
 	if err := want.Save(); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
@@ -159,9 +158,34 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 }
 
-// 0.1.x 的配置文件里有 name 字段，没有 label。TOML 解码器会安静地
-// 忽略未知字段，Label 落回空字符串——不该报错，也不该崩，纯粹降级成
-// 一条没有标签的定时（Ref 会现算出 "#1"）。
+func TestConcurrentSavesUseIndependentTemporaryFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := &Config{Version: CurrentVersion, Schedules: []Schedule{validSchedule()}}
+	const writers = 8
+	errs := make(chan error, writers)
+	for range writers {
+		go func() { errs <- c.Save() }()
+	}
+	for range writers {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent Save() error = %v", err)
+		}
+	}
+	if _, err := Load(); err != nil {
+		t.Fatalf("concurrent saves left invalid config: %v", err)
+	}
+	entries, err := os.ReadDir(paths.ConfigDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".config.toml.tmp-") {
+			t.Errorf("temporary config left behind: %s", entry.Name())
+		}
+	}
+}
+
+// 旧版 name 字段应被忽略并回落为无标签定时。
 func TestLoadIgnoresLegacyNameField(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
@@ -192,7 +216,7 @@ grace = 1200
 	}
 }
 
-func TestLoadDefaultsZeroGraceAndRejectsInvalidValues(t *testing.T) {
+func TestLoadPreservesExplicitZeroGrace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
 		t.Fatal(err)
@@ -214,11 +238,53 @@ grace = 0
 	if err != nil {
 		t.Fatalf("Load() error for valid config = %v", err)
 	}
-	if got := c.Schedules[0].Grace; got != DefaultGrace {
-		t.Errorf("zero grace = %d, want default %d", got, DefaultGrace)
+	if got := c.Schedules[0].Grace; got != 0 {
+		t.Errorf("zero grace = %d, want 0", got)
 	}
+}
 
-	invalidTOML := strings.Replace(validTOML, "weekdays = [1, 2, 3, 4, 5]", "weekdays = [1, 8]", 1)
+func TestLoadDefaultsMissingGrace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlText := `version = 1
+
+[[schedule]]
+label = "morning"
+at = "08:00"
+weekdays = [1, 2, 3, 4, 5]
+theme = "default"
+enabled = true
+`
+	if err := os.WriteFile(paths.ConfigFile(), []byte(tomlText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Schedules[0].Grace; got != DefaultGrace {
+		t.Errorf("missing grace = %d, want %d", got, DefaultGrace)
+	}
+}
+
+func TestLoadRejectsInvalidWeekday(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invalidTOML := `version = 1
+
+[[schedule]]
+label = "morning"
+at = "08:00"
+weekdays = [1, 8]
+theme = "default"
+enabled = true
+grace = 0
+`
+
 	if err := os.WriteFile(paths.ConfigFile(), []byte(invalidTOML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -227,9 +293,31 @@ grace = 0
 	}
 }
 
+func TestLoadRejectsUnsupportedVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	text := `version = 2
+
+[[schedule]]
+at = "08:00"
+weekdays = [1]
+theme = "default"
+enabled = true
+grace = 0
+`
+	if err := os.WriteFile(paths.ConfigFile(), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "不支持配置版本") {
+		t.Fatalf("Load() error = %v, want unsupported version error", err)
+	}
+}
+
 func TestSaveRejectsInvalidConfigBeforeWriting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if err := (&Config{Version: 1, Schedules: []Schedule{{
+	if err := (&Config{Version: CurrentVersion, Schedules: []Schedule{{
 		At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: -1,
 	}}}).Save(); err == nil {
 		t.Fatal("Save() should reject negative grace")

@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./...
+      - run: go vet ./...
+      - run: ruby -c packaging/gong.rb
+      - run: |
+          swiftc -typecheck -target arm64-apple-macos12 overlay.swift
+          swiftc -typecheck -target x86_64-apple-macos12 overlay.swift
