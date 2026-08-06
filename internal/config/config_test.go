@@ -21,6 +21,18 @@ func validSchedule() Schedule {
 	}
 }
 
+func TestDefaultSchedulesUseRandomThemes(t *testing.T) {
+	c := Default()
+	if len(c.Schedules) != 2 {
+		t.Fatalf("默认定时数量 = %d，想要 2", len(c.Schedules))
+	}
+	for i, schedule := range c.Schedules {
+		if schedule.Theme != ThemeRandom {
+			t.Errorf("默认定时 #%d 的主题 = %q，想要 %q", i+1, schedule.Theme, ThemeRandom)
+		}
+	}
+}
+
 func TestParseClock(t *testing.T) {
 	tests := []struct {
 		input string
