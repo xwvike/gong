@@ -27,17 +27,27 @@ gong off            # 关掉 gong，但保留配置和程序
 每条定时可以固定使用一个主题，也可以选择“随机”或“顺序”。顺序模式按主题名排序轮换，
 只按该定时选中的触发日推进，周末等未选日期不会跳号。
 
+跑 `gong themes` 可以看到每个主题的作者和出处。
+
+### bloom
+
+<img src="docs/bloom.gif" alt="bloom" width="720">
+
+### chroma
+
+<img src="docs/chroma.gif" alt="chroma" width="720">
+
 ### led
 
-<img src="docs/led.png" alt="led" width="720">
-
-### tunnel
-
-<img src="docs/tunnel.gif" alt="tunnel" width="720">
+<img src="docs/led.gif" alt="led" width="720">
 
 ### noise
 
 <img src="docs/noise.gif" alt="noise" width="720">
+
+### tunnel
+
+<img src="docs/tunnel.gif" alt="tunnel" width="720">
 
 ## 卸载
 
