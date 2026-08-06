@@ -434,10 +434,21 @@ func cmdThemes() error {
 	if len(list) == 0 {
 		return fmt.Errorf("一个主题都没找到（找过 %s 和 %s）", paths.UserThemes(), paths.Builtin())
 	}
+	info, _ := os.Stdout.Stat()
+	underlineSource := info != nil && info.Mode()&os.ModeCharDevice != 0
 	for _, t := range list {
-		fmt.Println(t.ID)
+		fmt.Println(themeAttribution(t, underlineSource))
 	}
 	return nil
+}
+
+func themeAttribution(t theme.Theme, underlineSource bool) string {
+	line := t.Attribution()
+	source := t.SourceURL()
+	if !underlineSource || source == "" {
+		return line
+	}
+	return strings.TrimSuffix(line, source) + "\x1b[4m" + source + "\x1b[24m"
 }
 
 // cmdVis 预览。走的是和真实触发【完全同一条渲染路径】，只是加了 --force

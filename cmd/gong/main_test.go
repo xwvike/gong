@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/xwvike/gong/internal/config"
+	"github.com/xwvike/gong/internal/theme"
 )
 
 // 没标签时 Ref 会现算出 "#N"，跟前面的序号撞车——这是默认路径，不是边角。
@@ -25,6 +26,20 @@ func TestRmPreviewDoesNotRepeatIndex(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "即将删除：#2 ") {
 		t.Errorf("有标签时序号也得在最前面：%q", got)
+	}
+}
+
+func TestThemeAttributionUnderlinesOnlySource(t *testing.T) {
+	th := theme.Theme{ID: "bloom", Meta: theme.Meta{
+		Author: "alice", Source: "https://github.com/alice/original_project",
+	}}
+	plain := "bloom  @alice  https://github.com/alice/original_project"
+	if got := themeAttribution(th, false); got != plain {
+		t.Fatalf("非终端输出 = %q", got)
+	}
+	want := "bloom  @alice  \x1b[4mhttps://github.com/alice/original_project\x1b[24m"
+	if got := themeAttribution(th, true); got != want {
+		t.Fatalf("终端输出 = %q", got)
 	}
 }
 

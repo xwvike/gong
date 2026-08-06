@@ -2,10 +2,13 @@ package tui
 
 import (
 	"bytes"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest"
 
 	"github.com/xwvike/gong/internal/config"
@@ -16,7 +19,10 @@ import (
 func fakeThemes() []theme.Theme {
 	return []theme.Theme{
 		{ID: "alpha", HTML: "/dev/null", Meta: theme.Meta{Lead: 0, Duration: 5}},
-		{ID: "beta", HTML: "/dev/null", Meta: theme.Meta{Lead: 3, Duration: 8}},
+		{ID: "beta", HTML: "/dev/null", Meta: theme.Meta{
+			Lead: 3, Duration: 8, Author: "alice",
+			Source: "https://github.com/alice/original_project",
+		}},
 	}
 }
 
@@ -252,6 +258,37 @@ func TestThemePickRoundTrip(t *testing.T) {
 	}
 }
 
+func TestVimHorizontalNavigationFollowsCurrentContext(t *testing.T) {
+	m := newModel(twoSchedules(), fakeThemes())
+
+	model, _ := m.updateKey(runes("l"))
+	m = model.(Model)
+	if m.tab != tabThemes {
+		t.Fatal("l 应从定时向右切到主题库")
+	}
+	model, _ = m.updateKey(runes("h"))
+	m = model.(Model)
+	if m.tab != tabSchedules {
+		t.Fatal("h 应从主题库向左切回定时")
+	}
+
+	m.mode = modeEdit
+	m.field = fMinute
+	model, _ = m.updateKey(runes("h"))
+	m = model.(Model)
+	if m.tab != tabSchedules || m.field != fHour {
+		t.Fatal("编辑态的 h 应左移字段，不应被 Tab 导航抢走")
+	}
+
+	m.tab = tabThemes
+	m.pickingTheme = true
+	model, _ = m.updateKey(runes("h"))
+	m = model.(Model)
+	if m.tab != tabThemes {
+		t.Fatal("主题选择器内的 h 应留给列表分页")
+	}
+}
+
 func TestThemePickerOffersRandomAndSequence(t *testing.T) {
 	c := twoSchedules()
 	tm := startModel(t, c)
@@ -279,8 +316,8 @@ func TestThemeStrategyDoesNotOfferPreview(t *testing.T) {
 	m.list.Select(0) // 随机
 
 	for _, binding := range m.currentHelp().ShortHelp() {
-		if binding.Help().Key == "v" {
-			t.Fatal("随机策略不应展示预览帮助")
+		if binding.Help().Key == "v" || binding.Help().Key == "o" {
+			t.Fatal("随机策略不应展示预览或原项目帮助")
 		}
 	}
 	model, cmd := m.updateThemes(runes("v"))
@@ -296,6 +333,86 @@ func TestThemeStrategyDoesNotOfferPreview(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("真实主题仍应展示预览帮助")
+	}
+}
+
+func TestThemeAttributionStaysOnOneLine(t *testing.T) {
+	item := newThemeItem(fakeThemes()[1])
+	title := item.Title()
+	for _, want := range []string{"beta", "@alice", "https://github.com/alice/original_project"} {
+		if !strings.Contains(title, want) {
+			t.Fatalf("主题单行信息 %q 缺少 %q", title, want)
+		}
+	}
+	if strings.Contains(title, "\n") || !styleSource.GetUnderline() {
+		t.Fatal("原项目应该在同一行以下划线展示")
+	}
+	plain := ansi.Strip(title)
+	if strings.Index(plain, "@alice") != themeNameColumnWidth ||
+		strings.Index(plain, item.source) != themeNameColumnWidth+themeAuthorColumnWidth {
+		t.Fatalf("主题、作者和 URL 列未对齐：%q", plain)
+	}
+}
+
+func TestThemeSourceDisplayIsTruncatedWithoutChangingTarget(t *testing.T) {
+	item := themeItem{
+		id:     "led",
+		author: "@originkit",
+		source: "https://www.originkit.dev/components/pixel-led-display?from=%2Fcategory%2Ftext&preset=base",
+	}
+	plain := ansi.Strip(item.Title())
+	displayedSource := plain[themeNameColumnWidth+themeAuthorColumnWidth:]
+	if ansi.StringWidth(displayedSource) != themeSourceMaxWidth || !strings.HasSuffix(displayedSource, "...") {
+		t.Fatalf("过长 URL 未按限制截断：%q", displayedSource)
+	}
+	if strings.Contains(displayedSource, "preset=base") || !strings.Contains(item.source, "preset=base") {
+		t.Fatal("展示应截断 URL，打开目标必须保留完整地址")
+	}
+}
+
+func TestThemeSourceHelpAndKeyFollowSelection(t *testing.T) {
+	m := newModel(twoSchedules(), fakeThemes())
+	m.tab = tabThemes
+	m.list.Select(0) // alpha 没有 source
+	for input, keys := range map[string][]string{
+		"h": m.list.KeyMap.PrevPage.Keys(),
+		"j": m.list.KeyMap.CursorDown.Keys(),
+		"k": m.list.KeyMap.CursorUp.Keys(),
+		"l": m.list.KeyMap.NextPage.Keys(),
+	} {
+		if !slices.Contains(keys, input) {
+			t.Fatalf("%s 应保留主题列表的 Vim 导航行为", input)
+		}
+	}
+
+	model, _ := m.updateThemes(runes("j"))
+	m = model.(Model)
+	if m.list.Index() != 1 {
+		t.Fatal("j 应保留主题列表向下移动的 Vim 行为")
+	}
+
+	found := false
+	for _, binding := range m.currentHelp().ShortHelp() {
+		found = found || binding.Help().Key == "o"
+	}
+	if !found {
+		t.Fatal("有原项目的主题应该展示 o 原项目")
+	}
+	model, cmd := m.updateThemes(runes("o"))
+	m = model.(Model)
+	if cmd == nil || m.list.Index() != 1 {
+		t.Fatal("o 应打开原项目且不移动主题光标")
+	}
+
+	m.list.Select(0) // alpha 没有 source
+	for _, binding := range m.currentHelp().ShortHelp() {
+		if binding.Help().Key == "o" {
+			t.Fatal("没有原项目的主题不应展示 o 原项目")
+		}
+	}
+	_, cmd = m.updateThemes(runes("o"))
+	if cmd != nil || m.list.Index() != 0 {
+		t.Fatal("没有原项目时 o 应安静忽略且不移动光标")
 	}
 }
 

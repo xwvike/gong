@@ -167,14 +167,23 @@ func (m Model) currentHelp() contextHelp {
 			[]key.Binding{k.Save, k.Quit, k.Help},
 		)
 	case m.tab == tabThemes:
+		item, _ := m.list.SelectedItem().(themeItem)
 		if m.pickingTheme {
-			if item, ok := m.list.SelectedItem().(themeItem); ok && config.IsThemeStrategy(item.id) {
+			if config.IsThemeStrategy(item.id) {
 				return short(k.Confirm, k.Cancel)
 			}
-			return short(k.Confirm, k.Cancel, k.Preview)
+			actions := []key.Binding{k.Confirm, k.Cancel, k.Preview}
+			if item.source != "" {
+				actions = append(actions, k.OpenSource)
+			}
+			return short(actions...)
+		}
+		actions := []key.Binding{k.TabNext, k.Preview}
+		if item.source != "" {
+			actions = append(actions, k.OpenSource)
 		}
 		return full(
-			[]key.Binding{k.TabNext, k.Preview},
+			actions,
 			[]key.Binding{k.Save, k.Quit, k.Help},
 		)
 	default:

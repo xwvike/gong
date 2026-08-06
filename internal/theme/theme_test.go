@@ -39,6 +39,67 @@ func TestLegacyThemeMetadataDefaults(t *testing.T) {
 	}
 }
 
+func TestThemeAttributionMetadata(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "bloom")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `author = "alice"
+source = "https://github.com/alice/original_project"
+`
+	if err := os.WriteFile(filepath.Join(dir, "theme.toml"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	th, err := load(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := th.Attribution(); got != "bloom  @alice  https://github.com/alice/original_project" {
+		t.Fatalf("主题归属信息 = %q", got)
+	}
+}
+
+func TestThemeAttributionIgnoresInvalidSource(t *testing.T) {
+	th := Theme{ID: "local", Meta: Meta{Author: "@alice", Source: "not a URL"}}
+	if th.AuthorLabel() != "@alice" {
+		t.Fatalf("已有 @ 的作者名被重复处理：%q", th.AuthorLabel())
+	}
+	if th.SourceURL() != "" || th.Attribution() != "local  @alice" {
+		t.Fatalf("非法来源不应进入展示或浏览器：%q", th.Attribution())
+	}
+}
+
+func TestBuiltinThemeAttributions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldBuiltin := paths.BuiltinThemes
+	paths.BuiltinThemes = filepath.Join("..", "..", "themes")
+	t.Cleanup(func() { paths.BuiltinThemes = oldBuiltin })
+
+	want := map[string]string{
+		"bloom":  "bloom  @Arlan  https://www.arlan.me/vault",
+		"chroma": "chroma  @Arlan  https://www.arlan.me/vault/chroma-glow",
+		"led":    "led  @originkit  https://www.originkit.dev/components/pixel-led-display?from=%2Fcategory%2Ftext&preset=base",
+		"noise":  "noise  @originkit  https://www.originkit.dev/components/text-noise?from=%2Fcategory%2Ftext&preset=base",
+		"tunnel": "tunnel  @originkit  https://www.originkit.dev/components/infinite-text-passage?from=%2Fcategory%2Ftext&preset=base",
+	}
+	got := make(map[string]string)
+	for _, th := range List() {
+		if th.ID == "dotcut" {
+			t.Fatal("dotcut 已移除，不应再出现在内置主题列表")
+		}
+		got[th.ID] = th.Attribution()
+	}
+	for id, attribution := range want {
+		if got[id] != attribution {
+			t.Errorf("内置主题 %s 的归属信息 = %q，想要 %q", id, got[id], attribution)
+		}
+	}
+}
+
 func TestThemeTimeoutSaturatesBeforeIntegerOverflow(t *testing.T) {
 	th := Theme{Meta: Meta{Duration: math.MaxInt}}
 	if got := th.TimeoutSeconds(); got != MaxVisible {

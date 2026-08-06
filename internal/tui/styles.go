@@ -23,6 +23,7 @@ var (
 	styleTabOff = lipgloss.NewStyle().Foreground(colDim).Padding(0, 1)
 	stylePanel  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1)
 	styleLabel  = lipgloss.NewStyle().Foreground(colDim).Width(6)
+	styleSource = lipgloss.NewStyle().Underline(true)
 
 	// bubbles/table 的 renderRow 用 runewidth.Truncate 截断单元格，
 	// 那个函数不认 ANSI 转义——颜色只能加在表头/选中行这种整行样式上，

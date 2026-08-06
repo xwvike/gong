@@ -1,2 +1,4 @@
 lead      = 3        # 倒数三个数，主题里的 countFrom 直接跟着这个值走
 duration  = 9        # 3s 倒数 + 1.9s 时刻牌 + 2.1s CLOCK OUT + 1.2s 退场，留点余量
+author    = "originkit"
+source    = "https://www.originkit.dev/components/infinite-text-passage?from=%2Fcategory%2Ftext&preset=base"

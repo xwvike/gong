@@ -1,2 +1,4 @@
 lead      = 4        # 时刻先亮 3.55s，最后 0.45s 雾散开，峰值正好压在到点那一刻
 duration  = 8        # 4s 时刻 + 0.6s 凝聚 + 2.2s 停留 + 0.9s 淡出，留点余量
+author    = "Arlan"
+source    = "https://www.arlan.me/vault/chroma-glow"

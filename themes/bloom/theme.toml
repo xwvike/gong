@@ -1,2 +1,4 @@
 lead      = 4        # 时刻先亮 4s，辉光呼吸、色相慢移，到点才溶解
 duration  = 9        # 4s 时刻 + 0.8s 溶解 + 2.4s 停留 + 1s 淡出，留点余量
+author    = "Arlan"
+source    = "https://www.arlan.me/vault"

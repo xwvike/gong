@@ -3,9 +3,11 @@ package theme
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 
@@ -14,8 +16,39 @@ import (
 )
 
 type Meta struct {
-	Lead     int `toml:"lead"`
-	Duration int `toml:"duration"`
+	Lead     int    `toml:"lead"`
+	Duration int    `toml:"duration"`
+	Author   string `toml:"author"`
+	Source   string `toml:"source"`
+}
+
+func (t Theme) AuthorLabel() string {
+	author := strings.TrimSpace(t.Meta.Author)
+	if author == "" || strings.HasPrefix(author, "@") {
+		return author
+	}
+	return "@" + author
+}
+
+// SourceURL 只返回能安全交给系统浏览器的 Web 地址。
+func (t Theme) SourceURL() string {
+	source := strings.TrimSpace(t.Meta.Source)
+	u, err := url.ParseRequestURI(source)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	return source
+}
+
+func (t Theme) Attribution() string {
+	parts := []string{t.ID}
+	if author := t.AuthorLabel(); author != "" {
+		parts = append(parts, author)
+	}
+	if source := t.SourceURL(); source != "" {
+		parts = append(parts, source)
+	}
+	return strings.Join(parts, "  ")
 }
 
 type Theme struct {

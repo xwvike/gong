@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -83,6 +84,8 @@ type Model struct {
 	status    string
 	isErr     bool
 }
+
+type sourceOpenedMsg struct{ err error }
 
 // Run 打开 TUI。返回 true 表示配置被改过、需要保存并接管 launchd。
 func Run(c *config.Config) (bool, error) {
@@ -171,7 +174,7 @@ func themeItems(themes []theme.Theme, includeStrategies bool) []list.Item {
 		items = append(items, themeItem{id: config.ThemeRandom}, themeItem{id: config.ThemeSequence})
 	}
 	for _, th := range themes {
-		items = append(items, themeItem{id: th.ID})
+		items = append(items, newThemeItem(th))
 	}
 	return items
 }
@@ -285,6 +288,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.resize(msg.Width, msg.Height)
 		return m, nil
+	case sourceOpenedMsg:
+		if msg.err != nil {
+			m.status = "打不开原项目：" + msg.err.Error()
+			m.isErr = true
+		} else {
+			m.status = ""
+			m.isErr = false
+		}
+		return m, nil
 	case tea.KeyMsg:
 		return m.updateKey(msg)
 	}
@@ -328,13 +340,17 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.tab == tabSchedules {
-			m.tab = tabThemes
-		} else {
-			m.tab = tabSchedules
+			return m.changeTab(tabThemes)
 		}
-		m.status = ""
-		m.resize(m.width, m.height)
-		return m, nil
+		return m.changeTab(tabSchedules)
+	case key.Matches(msg, m.keys.TabLeft):
+		if m.mode != modeEdit && !m.pickingTheme {
+			return m.changeTab(tabSchedules)
+		}
+	case key.Matches(msg, m.keys.TabRight):
+		if m.mode != modeEdit && !m.pickingTheme {
+			return m.changeTab(tabThemes)
+		}
 	}
 
 	if m.tab == tabThemes {
@@ -344,6 +360,16 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateEdit(msg)
 	}
 	return m.updateList(msg)
+}
+
+func (m Model) changeTab(tab appTab) (tea.Model, tea.Cmd) {
+	if m.tab == tab {
+		return m, nil
+	}
+	m.tab = tab
+	m.status = ""
+	m.resize(m.width, m.height)
+	return m, nil
 }
 
 func (m Model) handleQuit() (tea.Model, tea.Cmd) {
@@ -603,6 +629,11 @@ func (m Model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateThemes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case key.Matches(msg, m.keys.OpenSource):
+		if it, ok := m.list.SelectedItem().(themeItem); ok && it.source != "" {
+			return m, openSourceCmd(it.source)
+		}
+		return m, nil
 	case key.Matches(msg, m.keys.Preview):
 		if it, ok := m.list.SelectedItem().(themeItem); ok {
 			if config.IsThemeStrategy(it.id) {
@@ -641,6 +672,12 @@ func (m Model) updateThemes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
+}
+
+func openSourceCmd(source string) tea.Cmd {
+	return func() tea.Msg {
+		return sourceOpenedMsg{err: exec.Command("open", source).Run()}
+	}
 }
 
 // previewSchedule/previewTheme 走的是和真实触发完全同一条渲染路径，只是多了
