@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 
 	"github.com/xwvike/gong/internal/config"
-	"github.com/xwvike/gong/internal/theme"
 )
 
 func (m Model) View() string {
@@ -74,7 +73,7 @@ func (m Model) renderTabs() string {
 func (m Model) brokenThemeWarnings() []string {
 	var warnings []string
 	for i, s := range m.cfg.Schedules {
-		if _, err := theme.Resolve(s.Theme); err != nil {
+		if !m.hasThemeChoice(s.Theme) {
 			warnings = append(warnings, fmt.Sprintf("%s 的主题 %q 找不到", s.Ref(i), s.Theme))
 		}
 	}
@@ -124,11 +123,11 @@ func (m Model) renderGrace(s config.Schedule) string {
 }
 
 func (m Model) renderThemeField(s config.Schedule) string {
-	label := s.Theme
-	if _, err := theme.Resolve(s.Theme); err != nil {
+	label := config.ThemeLabel(s.Theme)
+	if !m.hasThemeChoice(s.Theme) {
 		label = styleErr.Render(s.Theme + " ✗ 找不到")
 	} else if m.field == fTheme {
-		label = styleField.Render(s.Theme)
+		label = styleField.Render(label)
 	}
 	return label
 }
@@ -169,6 +168,9 @@ func (m Model) currentHelp() contextHelp {
 		)
 	case m.tab == tabThemes:
 		if m.pickingTheme {
+			if item, ok := m.list.SelectedItem().(themeItem); ok && config.IsThemeStrategy(item.id) {
+				return short(k.Confirm, k.Cancel)
+			}
 			return short(k.Confirm, k.Cancel, k.Preview)
 		}
 		return full(

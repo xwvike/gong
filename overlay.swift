@@ -1,6 +1,6 @@
 // gong-overlay 在所有屏幕顶层播放无焦点、点击穿透的 HTML 提示。
 // 编译： swiftc -O overlay.swift -o gong-overlay
-// 预览： ./gong-overlay --force --theme ./themes/default/index.html
+// 预览： ./gong-overlay --force --theme ./themes/led/index.html
 
 import Cocoa
 import CoreGraphics

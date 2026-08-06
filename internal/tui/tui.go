@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -144,10 +145,7 @@ func newScheduleTable() table.Model {
 }
 
 func newThemeList(themes []theme.Theme) list.Model {
-	items := make([]list.Item, len(themes))
-	for i, t := range themes {
-		items[i] = themeItem{t}
-	}
+	items := themeItems(themes, false)
 	// 主题仅展示名称，每项占一行。
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = false // 关掉后 Height() 恒为 1，不用再 SetHeight
@@ -165,6 +163,22 @@ func newThemeList(themes []theme.Theme) list.Model {
 	l.KeyMap.Quit = key.NewBinding()
 	l.KeyMap.ForceQuit = key.NewBinding()
 	return l
+}
+
+func themeItems(themes []theme.Theme, includeStrategies bool) []list.Item {
+	items := make([]list.Item, 0, len(themes)+2)
+	if includeStrategies {
+		items = append(items, themeItem{id: config.ThemeRandom}, themeItem{id: config.ThemeSequence})
+	}
+	for _, th := range themes {
+		items = append(items, themeItem{id: th.ID})
+	}
+	return items
+}
+
+func (m *Model) setThemePickerItems(enabled bool) {
+	m.list.ResetFilter()
+	_ = m.list.SetItems(themeItems(m.themes, enabled))
 }
 
 // newLabelInput 接受可为空的展示标签。
@@ -206,7 +220,7 @@ func (m *Model) refreshTable() {
 			label = "—" // 标签可选，没有就留个占位符，别显示成空白像渲染坏了
 		}
 		// 主题资源错误由表格外的状态行显示。
-		rows = append(rows, table.Row{dot, fmt.Sprintf("#%d", i+1), label, s.At, s.WeekdaysLabel(), s.Theme, wake})
+		rows = append(rows, table.Row{dot, fmt.Sprintf("#%d", i+1), label, s.At, s.WeekdaysLabel(), config.ThemeLabel(s.Theme), wake})
 	}
 	cursor := m.table.Cursor()
 	m.table.SetRows(rows)
@@ -222,8 +236,9 @@ func (m *Model) refreshTable() {
 }
 
 func (m *Model) themeIndexInList(id string) int {
+	id = config.NormalizeTheme(id)
 	for i, item := range m.list.Items() {
-		if item.(themeItem).t.ID == id {
+		if item.(themeItem).id == id {
 			return i
 		}
 	}
@@ -256,7 +271,7 @@ func (m *Model) applyLayout() {
 
 	// list 始终为过滤输入框保留一行。
 	const listChrome = 1
-	itemLines := max(1, len(m.themes)) // delegate 压成了 1 行/条、条间无间距
+	itemLines := max(1, len(m.list.Items())) // delegate 压成了 1 行/条、条间无间距
 
 	// 仅在内容溢出时显示分页提示。
 	m.list.SetShowPagination(itemLines+listChrome > contentH)
@@ -347,12 +362,8 @@ func (m Model) handleSave() (tea.Model, tea.Cmd) {
 		m.isErr = true
 		return m, nil
 	}
-	available := make(map[string]bool, len(m.themes))
-	for _, th := range m.themes {
-		available[th.ID] = true
-	}
 	for i, schedule := range m.cfg.Schedules {
-		if schedule.Enabled && !available[schedule.Theme] {
+		if schedule.Enabled && !m.hasThemeChoice(schedule.Theme) {
 			m.status = fmt.Sprintf("存不了：%s 的主题 %q 找不到", schedule.Ref(i), schedule.Theme)
 			m.isErr = true
 			return m, nil
@@ -453,6 +464,7 @@ func (m Model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pickingTheme = true
 		m.tab = tabThemes
 		m.list.ResetFilter()
+		m.setThemePickerItems(true)
 		m.list.Select(m.themeIndexInList(s.Theme))
 		m.resize(m.width, m.height)
 		return m, nil
@@ -489,8 +501,9 @@ func (m *Model) bump(s *config.Schedule, dir int) {
 		minutes := min(max(s.Grace/60+dir*graceStepMinutes, 0), graceMaxMinutes)
 		s.Grace = minutes * 60
 	case m.field == fTheme:
-		i := wrap(m.themeIndexOf(s.Theme)+dir, len(m.themes))
-		s.Theme = m.themes[i].ID
+		choices := m.themeChoices()
+		i := wrap(themeIndex(choices, s.Theme)+dir, len(choices))
+		s.Theme = choices[i]
 	case m.field >= fWeek0:
 		day := weekOrder[m.field-fWeek0]
 		set := map[int]bool{}
@@ -525,9 +538,31 @@ func (m *Model) defaultThemeID() string {
 	return m.themes[0].ID
 }
 
-func (m *Model) themeIndexOf(id string) int {
-	for i, t := range m.themes {
-		if t.ID == id {
+func (m *Model) themeChoices() []string {
+	choices := []string{config.ThemeRandom, config.ThemeSequence}
+	for _, th := range m.themes {
+		choices = append(choices, th.ID)
+	}
+	return choices
+}
+
+func (m *Model) hasThemeChoice(id string) bool {
+	if config.IsThemeStrategy(id) {
+		return len(m.themes) > 0
+	}
+	id = config.NormalizeTheme(id)
+	for _, th := range m.themes {
+		if th.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func themeIndex(choices []string, id string) int {
+	id = config.NormalizeTheme(id)
+	for i, choice := range choices {
+		if choice == id {
 			return i
 		}
 	}
@@ -580,7 +615,10 @@ func (m Model) updateThemes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Preview):
 		if it, ok := m.list.SelectedItem().(themeItem); ok {
-			m.status, m.isErr = m.previewTheme(it.t)
+			if config.IsThemeStrategy(it.id) {
+				return m, nil
+			}
+			m.status, m.isErr = m.previewChoice(it.id)
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Confirm):
@@ -589,12 +627,13 @@ func (m Model) updateThemes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if it, ok := m.list.SelectedItem().(themeItem); ok {
 			if s := m.selected(); s != nil {
-				s.Theme = it.t.ID
+				s.Theme = it.id
 				m.changed = true
 				m.refreshTable()
 			}
 		}
 		m.pickingTheme = false
+		m.setThemePickerItems(false)
 		m.tab = tabSchedules
 		m.mode = modeEdit
 		m.resize(m.width, m.height)
@@ -602,6 +641,7 @@ func (m Model) updateThemes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Cancel):
 		if m.pickingTheme {
 			m.pickingTheme = false
+			m.setThemePickerItems(false)
 			m.tab = tabSchedules
 			m.mode = modeEdit
 			m.resize(m.width, m.height)
@@ -620,7 +660,26 @@ func (m Model) previewSchedule() (string, bool) {
 	if s == nil {
 		return "", false
 	}
-	th, err := theme.Resolve(s.Theme)
+	th, err := theme.SelectFrom(m.themes, *s, m.table.Cursor(), time.Now())
+	if err != nil {
+		return err.Error(), true
+	}
+	return m.previewTheme(th)
+}
+
+func (m Model) previewChoice(id string) (string, bool) {
+	s := m.selected()
+	if s == nil {
+		for _, th := range m.themes {
+			if th.ID == id {
+				return m.previewTheme(th)
+			}
+		}
+		return "找不到主题 " + id, true
+	}
+	choice := *s
+	choice.Theme = id
+	th, err := theme.SelectFrom(m.themes, choice, m.table.Cursor(), time.Now())
 	if err != nil {
 		return err.Error(), true
 	}

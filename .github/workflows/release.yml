@@ -73,7 +73,7 @@ jobs:
           ./gong version
           ./gong themes
           # --force 不看时间窗，能跑通就说明壳和主题都完好
-          ./gong-overlay --force --timeout 3 --theme themes/default/index.html
+          ./gong-overlay --force --timeout 3 --theme themes/led/index.html
 
       - uses: softprops/action-gh-release@v2
         with:

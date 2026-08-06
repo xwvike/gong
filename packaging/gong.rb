@@ -17,8 +17,8 @@ class Gong < Formula
 
   test do
     assert_match version.to_s, shell_output("#{bin}/gong version")
-    assert_match "default", shell_output("#{bin}/gong themes")
+    assert_match "led", shell_output("#{bin}/gong themes")
     system bin/"gong-overlay", "--force", "--timeout", "3",
-           "--theme", pkgshare/"themes/default/index.html"
+           "--theme", pkgshare/"themes/led/index.html"
   end
 end

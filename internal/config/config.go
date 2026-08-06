@@ -32,6 +32,9 @@ type Schedule struct {
 const (
 	CurrentVersion = 1
 	DefaultGrace   = 1200
+	DefaultTheme   = "led"
+	ThemeRandom    = "@random"
+	ThemeSequence  = "@sequence"
 )
 
 type diskConfig struct {
@@ -47,9 +50,6 @@ type diskSchedule struct {
 	Enabled  bool   `toml:"enabled"`
 	Grace    *int   `toml:"grace"`
 }
-
-// DefaultTheme 是新定时的首选主题；调用方仍需处理资源缺失。
-const DefaultTheme = "default"
 
 // Default 是 gong on 在没有配置时写下的东西。
 // 两条都给了标签只是做个示范——标签不是必须的，序号本身就够用。
@@ -83,7 +83,7 @@ func Load() (*Config, error) {
 		}
 		c.Schedules = append(c.Schedules, Schedule{
 			Label: raw.Label, At: raw.At, Weekdays: raw.Weekdays,
-			Theme: raw.Theme, Enabled: raw.Enabled, Grace: grace,
+			Theme: NormalizeTheme(raw.Theme), Enabled: raw.Enabled, Grace: grace,
 		})
 	}
 	// 配置文件可以被手动编辑，所以读取时也要校验，避免 gong fire
@@ -92,6 +92,30 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return &c, nil
+}
+
+// NormalizeTheme 把 0.1.x 的内置主题名迁移到新名称。
+func NormalizeTheme(id string) string {
+	if id == "default" {
+		return DefaultTheme
+	}
+	return id
+}
+
+func IsThemeStrategy(id string) bool {
+	return id == ThemeRandom || id == ThemeSequence
+}
+
+func ThemeLabel(id string) string {
+	id = NormalizeTheme(id)
+	switch id {
+	case ThemeRandom:
+		return "随机"
+	case ThemeSequence:
+		return "顺序"
+	default:
+		return id
+	}
 }
 
 // LoadOrDefault 让 ls / set 在还没 gong on 过的时候也能跑。

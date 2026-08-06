@@ -80,6 +80,13 @@ func TestTableShowsSequenceNumbers(t *testing.T) {
 	finalModel(t, tm)
 }
 
+func TestTableHeaderAndCellsUseSameHorizontalPadding(t *testing.T) {
+	if styleTableHeader.GetPaddingLeft() != styleTableCell.GetPaddingLeft() ||
+		styleTableHeader.GetPaddingRight() != styleTableCell.GetPaddingRight() {
+		t.Fatal("表头和内容的水平留白不一致，列会错位")
+	}
+}
+
 func TestToggleEnabled(t *testing.T) {
 	c := twoSchedules()
 	tm := startModel(t, c)
@@ -242,6 +249,63 @@ func TestThemePickRoundTrip(t *testing.T) {
 	}
 	if !m.changed {
 		t.Error("选主题后 changed 应该是 true")
+	}
+}
+
+func TestThemePickerOffersRandomAndSequence(t *testing.T) {
+	c := twoSchedules()
+	tm := startModel(t, c)
+
+	tm.Send(press(tea.KeyEnter))
+	tm.Send(runes("t"))
+	tm.Send(press(tea.KeyUp)) // alpha -> 顺序
+	tm.Send(press(tea.KeyUp)) // 顺序 -> 随机
+	tm.Send(press(tea.KeyEnter))
+	m := finalModel(t, tm)
+
+	if got := c.Schedules[0].Theme; got != config.ThemeRandom {
+		t.Fatalf("选择随机后主题 = %q", got)
+	}
+	if len(m.list.Items()) != len(fakeThemes()) {
+		t.Fatal("退出定时主题选择后，主题库不应继续显示策略项")
+	}
+}
+
+func TestThemeStrategyDoesNotOfferPreview(t *testing.T) {
+	m := newModel(twoSchedules(), fakeThemes())
+	m.pickingTheme = true
+	m.tab = tabThemes
+	m.setThemePickerItems(true)
+	m.list.Select(0) // 随机
+
+	for _, binding := range m.currentHelp().ShortHelp() {
+		if binding.Help().Key == "v" {
+			t.Fatal("随机策略不应展示预览帮助")
+		}
+	}
+	model, cmd := m.updateThemes(runes("v"))
+	m = model.(Model)
+	if cmd != nil || m.status != "" {
+		t.Fatalf("随机策略按 v 应安静忽略：cmd=%v status=%q", cmd, m.status)
+	}
+
+	m.list.Select(2) // alpha
+	found := false
+	for _, binding := range m.currentHelp().ShortHelp() {
+		found = found || binding.Help().Key == "v"
+	}
+	if !found {
+		t.Fatal("真实主题仍应展示预览帮助")
+	}
+}
+
+func TestThemeFieldStepIncludesStrategies(t *testing.T) {
+	c := twoSchedules()
+	m := newModel(c, fakeThemes())
+	m.field = fTheme
+	m.bump(&c.Schedules[0], -1) // alpha 前一项是顺序
+	if got := c.Schedules[0].Theme; got != config.ThemeSequence {
+		t.Fatalf("主题字段没有步进到顺序策略，拿到 %q", got)
 	}
 }
 
@@ -433,11 +497,11 @@ func TestAddUsesDefaultThemeNotAlphabeticalFirst(t *testing.T) {
 	}
 }
 
-// 内置目录整个没装好时 default 解析不开，这时候必须还能建出定时来，
-// 不能因为拿不到 default 就崩或者留个空主题。
+// 内置目录整个没装好时 led 解析不开，这时候必须还能建出定时来，
+// 不能因为拿不到 led 就崩或者留个空主题。
 func TestDefaultThemeIDFallsBackWhenDefaultMissing(t *testing.T) {
-	m := newModel(twoSchedules(), fakeThemes()) // 里面没有 default
+	m := newModel(twoSchedules(), fakeThemes()) // 里面没有 led
 	if got := m.defaultThemeID(); got != "alpha" {
-		t.Errorf("没有 default 时该回落到列表第一个，得到 %q", got)
+		t.Errorf("没有 led 时该回落到列表第一个，得到 %q", got)
 	}
 }

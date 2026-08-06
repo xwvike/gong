@@ -15,7 +15,7 @@ func validSchedule() Schedule {
 		Label:    "lunch",
 		At:       "12:34:56",
 		Weekdays: []int{1, 3, 5},
-		Theme:    "default",
+		Theme:    DefaultTheme,
 		Enabled:  true,
 		Grace:    DefaultGrace,
 	}
@@ -92,7 +92,7 @@ func TestValidate(t *testing.T) {
 		{name: "weekday below range", mutate: func(c *Config) { c.Schedules[0].Weekdays = []int{-1} }, wantError: "星期几必须是 0 到 7"},
 		{name: "weekday above range", mutate: func(c *Config) { c.Schedules[0].Weekdays = []int{8} }, wantError: "星期几必须是 0 到 7"},
 		{name: "empty theme", mutate: func(c *Config) { c.Schedules[0].Theme = "" }, wantError: "没有主题"},
-		{name: "unsafe theme", mutate: func(c *Config) { c.Schedules[0].Theme = "../default" }, wantError: "主题名不能含路径分隔符"},
+		{name: "unsafe theme", mutate: func(c *Config) { c.Schedules[0].Theme = "../led" }, wantError: "主题名不能含路径分隔符"},
 		{name: "negative grace", mutate: func(c *Config) { c.Schedules[0].Grace = -1 }, wantError: "grace 不能是负数"},
 	}
 
@@ -125,7 +125,7 @@ func TestValidate(t *testing.T) {
 // 错误信息有标签时用标签，否则用序号。
 func TestValidateErrorUsesDisplayName(t *testing.T) {
 	c := &Config{Version: CurrentVersion, Schedules: []Schedule{
-		{Label: "午间", At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: -1},
+		{Label: "午间", At: "12:00", Weekdays: []int{1}, Theme: DefaultTheme, Grace: -1},
 	}}
 	err := c.Validate()
 	if err == nil || !strings.Contains(err.Error(), "午间") {
@@ -155,6 +155,60 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Schedules[0], want.Schedules[0]) {
 		t.Errorf("loaded schedule = %#v, want %#v", got.Schedules[0], want.Schedules[0])
+	}
+}
+
+func TestLoadMigratesDefaultThemeToLED(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `version = 1
+
+[[schedule]]
+at = "12:00"
+weekdays = [1]
+theme = "default"
+enabled = true
+grace = 1200
+`
+	if err := os.WriteFile(paths.ConfigFile(), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Schedules[0].Theme; got != DefaultTheme {
+		t.Errorf("旧主题迁移后 = %q，想要 %q", got, DefaultTheme)
+	}
+}
+
+func TestThemeStrategyLabels(t *testing.T) {
+	if !IsThemeStrategy(ThemeRandom) || !IsThemeStrategy(ThemeSequence) || IsThemeStrategy(DefaultTheme) {
+		t.Fatal("主题策略识别不正确")
+	}
+	if ThemeLabel(ThemeRandom) != "随机" || ThemeLabel(ThemeSequence) != "顺序" {
+		t.Fatal("主题策略没有使用面向用户的名称")
+	}
+	if ThemeLabel("default") != DefaultTheme {
+		t.Fatal("旧主题名没有按新名称展示")
+	}
+}
+
+func TestThemeStrategySaveAndLoad(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := &Config{Version: CurrentVersion, Schedules: []Schedule{validSchedule()}}
+	c.Schedules[0].Theme = ThemeSequence
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Schedules[0].Theme; got != ThemeSequence {
+		t.Fatalf("顺序策略往返后 = %q", got)
 	}
 }
 
@@ -197,7 +251,7 @@ func TestLoadIgnoresLegacyNameField(t *testing.T) {
 name = "noon"
 at = "12:00:00"
 weekdays = [1, 2, 3, 4, 5]
-theme = "default"
+theme = "led"
 enabled = true
 grace = 1200
 `
@@ -227,7 +281,7 @@ func TestLoadPreservesExplicitZeroGrace(t *testing.T) {
 label = "morning"
 at = "08:00"
 weekdays = [1, 2, 3, 4, 5]
-theme = "default"
+theme = "led"
 enabled = true
 grace = 0
 `
@@ -254,7 +308,7 @@ func TestLoadDefaultsMissingGrace(t *testing.T) {
 label = "morning"
 at = "08:00"
 weekdays = [1, 2, 3, 4, 5]
-theme = "default"
+theme = "led"
 enabled = true
 `
 	if err := os.WriteFile(paths.ConfigFile(), []byte(tomlText), 0o644); err != nil {
@@ -280,7 +334,7 @@ func TestLoadRejectsInvalidWeekday(t *testing.T) {
 label = "morning"
 at = "08:00"
 weekdays = [1, 8]
-theme = "default"
+theme = "led"
 enabled = true
 grace = 0
 `
@@ -303,7 +357,7 @@ func TestLoadRejectsUnsupportedVersion(t *testing.T) {
 [[schedule]]
 at = "08:00"
 weekdays = [1]
-theme = "default"
+theme = "led"
 enabled = true
 grace = 0
 `
@@ -318,7 +372,7 @@ grace = 0
 func TestSaveRejectsInvalidConfigBeforeWriting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := (&Config{Version: CurrentVersion, Schedules: []Schedule{{
-		At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: -1,
+		At: "12:00", Weekdays: []int{1}, Theme: DefaultTheme, Grace: -1,
 	}}}).Save(); err == nil {
 		t.Fatal("Save() should reject negative grace")
 	}
@@ -329,8 +383,8 @@ func TestSaveRejectsInvalidConfigBeforeWriting(t *testing.T) {
 
 func TestAtAndRemoveAtAreIndexBased(t *testing.T) {
 	c := &Config{Schedules: []Schedule{
-		{Label: "a", At: "12:00", Weekdays: []int{1}, Theme: "default", Grace: DefaultGrace},
-		{Label: "b", At: "18:00", Weekdays: []int{1}, Theme: "default", Grace: DefaultGrace},
+		{Label: "a", At: "12:00", Weekdays: []int{1}, Theme: DefaultTheme, Grace: DefaultGrace},
+		{Label: "b", At: "18:00", Weekdays: []int{1}, Theme: DefaultTheme, Grace: DefaultGrace},
 	}}
 
 	if _, ok := c.At(-1); ok {

@@ -76,12 +76,9 @@ func TriggerFor(s config.Schedule) Trigger {
 	return ComputeTrigger(s.Seconds(), scheduleLead(s), s.Weekdays)
 }
 
-// scheduleLead 在主题不可用时返回 0，保证只读展示和反查仍可执行。
+// scheduleLead 对动态策略取全部候选主题的最大值。
 func scheduleLead(s config.Schedule) int {
-	if th, err := theme.Resolve(s.Theme); err == nil {
-		return th.LeadSeconds()
-	}
-	return 0
+	return theme.WakeLead(s.Theme)
 }
 
 // targetForTrigger 按相同的跨日偏移规则还原绝对目标时刻。
@@ -164,7 +161,7 @@ func ValidateScheduleSet(c *config.Config) error {
 		if !s.Enabled {
 			continue
 		}
-		if _, err := theme.Resolve(s.Theme); err != nil {
+		if err := theme.ValidateChoice(s.Theme); err != nil {
 			return fmt.Errorf("定时 %s：%w", s.Ref(i), err)
 		}
 	}

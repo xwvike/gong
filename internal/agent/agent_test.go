@@ -50,7 +50,7 @@ func TestComputeTrigger(t *testing.T) {
 // sched 创建一条测试定时。
 func sched(label, at string, days []int) config.Schedule {
 	return config.Schedule{Label: label, At: at, Weekdays: days,
-		Theme: "default", Enabled: true, Grace: config.DefaultGrace}
+		Theme: config.DefaultTheme, Enabled: true, Grace: config.DefaultGrace}
 }
 
 // 2026-07-27 是周一
@@ -134,6 +134,43 @@ func withLeadTheme(t *testing.T, lead int) string {
 		t.Fatal(err)
 	}
 	return "faketheme"
+}
+
+func TestDynamicStrategyUsesMaximumThemeLead(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	builtin := t.TempDir()
+	oldBuiltin := paths.BuiltinThemes
+	paths.BuiltinThemes = builtin
+	t.Cleanup(func() { paths.BuiltinThemes = oldBuiltin })
+	for id, lead := range map[string]int{"fast": 1, "slow": 6} {
+		dir := filepath.Join(builtin, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "theme.toml"),
+			[]byte(fmt.Sprintf("lead = %d\n", lead)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := sched("dynamic", "12:00:00", []int{1})
+	s.Theme = config.ThemeRandom
+	tr := TriggerFor(s)
+	if tr.Hour != 11 || tr.Minute != 59 {
+		t.Fatalf("动态策略触发于 %02d:%02d，想要按最大 lead 提前到 11:59", tr.Hour, tr.Minute)
+	}
+	if err := ValidateScheduleSet(&config.Config{
+		Version: config.CurrentVersion, Schedules: []config.Schedule{s},
+	}); err != nil {
+		t.Fatalf("动态策略应通过资源校验：%v", err)
+	}
+	match := MatchTarget(&config.Config{Schedules: []config.Schedule{s}}, mon(11, 59, 0))
+	if match == nil || !match.Target.Equal(mon(12, 0, 0)) {
+		t.Fatalf("动态策略反查目标时刻错误：%v", match)
+	}
 }
 
 // 周日午夜前触发的定时，星期已经被移到周六，反查时也得对得上
@@ -297,7 +334,7 @@ func TestWritePlistReplacesFileWithoutLeavingTemp(t *testing.T) {
 func TestSyncRejectsInvalidConfigBeforeWriting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	c := &config.Config{Version: config.CurrentVersion, Schedules: []config.Schedule{{
-		At: "25:00", Weekdays: []int{1}, Theme: "default", Enabled: true,
+		At: "25:00", Weekdays: []int{1}, Theme: config.DefaultTheme, Enabled: true,
 	}}}
 	res := Sync(c, "/tmp/gong")
 	if len(res.Errors) != 1 {

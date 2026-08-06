@@ -24,9 +24,12 @@ gong off            # 关掉 gong，但保留配置和程序
 
 ## 主题
 
-### default
+每条定时可以固定使用一个主题，也可以选择“随机”或“顺序”。顺序模式按主题名排序轮换，
+只按该定时选中的触发日推进，周末等未选日期不会跳号。
 
-<img src="docs/default.png" alt="default" width="720">
+### led
+
+<img src="docs/led.png" alt="led" width="720">
 
 ### tunnel
 

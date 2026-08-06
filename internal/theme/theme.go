@@ -9,6 +9,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/xwvike/gong/internal/config"
 	"github.com/xwvike/gong/internal/paths"
 )
 
@@ -75,8 +76,12 @@ func load(dir string, builtin bool) (Theme, error) {
 
 // Resolve 按「用户目录优先」找主题。
 func Resolve(id string) (Theme, error) {
+	id = config.NormalizeTheme(id)
 	if id == "" || id == "." || id == ".." || filepath.Base(id) != id {
 		return Theme{}, fmt.Errorf("主题名 %q 非法", id)
+	}
+	if config.IsThemeStrategy(id) {
+		return Theme{}, fmt.Errorf("%q 是定时主题策略，不是可预览的主题", config.ThemeLabel(id))
 	}
 	for _, root := range []struct {
 		dir     string
@@ -109,6 +114,10 @@ func List() []Theme {
 		}
 		for _, e := range entries {
 			if !e.IsDir() {
+				continue
+			}
+			// default 是 led 的历史别名，不再占用一个独立主题名。
+			if e.Name() == "default" || config.IsThemeStrategy(e.Name()) {
 				continue
 			}
 			if !builtin {

@@ -9,7 +9,7 @@ import (
 
 // 没标签时 Ref 会现算出 "#N"，跟前面的序号撞车——这是默认路径，不是边角。
 func TestRmPreviewDoesNotRepeatIndex(t *testing.T) {
-	s := config.Schedule{At: "12:00:00", Weekdays: []int{1}, Theme: "default"}
+	s := config.Schedule{At: "12:00:00", Weekdays: []int{1}, Theme: config.DefaultTheme}
 	got := rmPreview(2, s)
 	if strings.Contains(got, "#2 #2") {
 		t.Errorf("没标签时序号打了两遍：%q", got)
@@ -61,7 +61,7 @@ func TestCmdRmRejectsUnknownFlagAndExtraArguments(t *testing.T) {
 }
 
 func TestCmdVisRejectsExtraArguments(t *testing.T) {
-	if err := cmdVis([]string{"default", "extra"}); err == nil || !strings.Contains(err.Error(), "参数太多") {
+	if err := cmdVis([]string{"led", "extra"}); err == nil || !strings.Contains(err.Error(), "参数太多") {
 		t.Fatalf("cmdVis() error = %v, want extra arguments error", err)
 	}
 }

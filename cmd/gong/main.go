@@ -135,7 +135,7 @@ func install(c *config.Config) error {
 		s := a.Schedule
 		tr := agent.TriggerFor(s)
 		fmt.Printf("%-6s %s %s  主题 %-8s (launchd 在 %02d:%02d 叫醒)\n",
-			s.Ref(a.Index), s.At, s.WeekdaysLabel(), s.Theme, tr.Hour, tr.Minute)
+			s.Ref(a.Index), s.At, s.WeekdaysLabel(), config.ThemeLabel(s.Theme), tr.Hour, tr.Minute)
 	}
 	for _, e := range res.Errors {
 		fmt.Fprintln(os.Stderr, "  !", e)
@@ -347,7 +347,7 @@ func cmdLs() error {
 			wake = fmt.Sprintf("%02d:%02d", tr.Hour, tr.Minute)
 		}
 		note := ""
-		if _, err := theme.Resolve(s.Theme); err != nil {
+		if err := theme.ValidateChoice(s.Theme); err != nil {
 			note = "  ← 主题找不到"
 		}
 		label := s.Label
@@ -355,7 +355,7 @@ func cmdLs() error {
 			label = "—"
 		}
 		fmt.Printf("#%-3d %-8s %-9s %-8s %-10s %-8s %s%s\n",
-			i+1, label, s.At, s.WeekdaysLabel(), s.Theme, state, wake, note)
+			i+1, label, s.At, s.WeekdaysLabel(), config.ThemeLabel(s.Theme), state, wake, note)
 	}
 
 	// 所有定时共用一个 launchd job，所以接管状态是全局的一个。
@@ -422,7 +422,7 @@ func cmdRm(args []string) error {
 
 // rmPreview 始终显示序号，仅在存在标签时追加标签。
 func rmPreview(n int, s config.Schedule) string {
-	line := fmt.Sprintf("即将删除：#%d %s %s  主题 %s", n, s.At, s.WeekdaysLabel(), s.Theme)
+	line := fmt.Sprintf("即将删除：#%d %s %s  主题 %s", n, s.At, s.WeekdaysLabel(), config.ThemeLabel(s.Theme))
 	if s.Label != "" {
 		line += "  标签 " + s.Label
 	}
@@ -495,7 +495,7 @@ func cmdFire(_ []string) error {
 	if target.IsZero() {
 		return fmt.Errorf("无法计算定时 %s 的目标时刻", s.Ref(match.Index))
 	}
-	th, err := theme.Resolve(s.Theme)
+	th, err := theme.Select(*s, match.Index, target)
 	if err != nil {
 		return err
 	}
